@@ -452,12 +452,7 @@ class LRDominanceNode(object):
         seen.add(self)
         if state_count == 0:
             if self.item_set in reduce_states:
-                for pred in self.direct_predecessors:
-                    if pred.item_set != self.item_set:
-                        if self.item not in result:
-                            result[self.item] = path
-                    else:
-                        pred.backtrack_shift(result, path.derive_from(pred, None), state_count, reduce_states, seen)
+                result[self.item] = path
         else:
             for pred, la in self.direct_predecessors.items():
                 if pred.item_set == self.item_set:
