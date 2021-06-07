@@ -340,6 +340,7 @@ class LRItem(object):
 class LRPath(object):
     class LRPathItem(object):
         def __init__(self, lookahead):
+            self._hash = (lookahead,)
             self._lookahead = lookahead
 
         def to_string(self):
@@ -353,7 +354,14 @@ class LRPath(object):
             self._sequence = [LRPath.LRPathItem('\u2666')] + [LRPath.LRPathItem(i) for i in self._node.item.prod[self._node.item.lr_index+1:]]
         else:
             self._sequence = [LRPath.LRPathItem(i) for i in self._node.item.prod[self._node.item.lr_index+1:]]
+        self._hash = sum([s._hash for s in self._sequence], start=(node.item, ))
 
+    def __hash__(self):
+        return hash(self._hash)
+
+    def __eq__(self, other):
+        return self._hash == other._hash
+        
     def derive_from(self, node, lookahead):
         if lookahead is None:
             return LRPath(node, [self] + [LRPath.LRPathItem(i) for i in node.item.prod[node.item.lr_index+2:]])
@@ -406,39 +414,42 @@ class LRDominanceNode(object):
             return
         seen.add(self)
         if state_count == 0:
+            if self.item_set in result:
+                return
             if self.item.lr_index + reduce_size == len(self.item.prod) - 1:
-                for pred in self.direct_predecessors:
-                    if pred.item_set == self.item_set and pred != self:
-                        pred.backtrack_reduce(result, path.derive_from(pred, None), 1, state_count, self.item.name, lookahead, seen)
                 # expand path after lookahead
                 for successor in self.direct_successors:
                     if successor.direct_predecessors[self] == reduced_lookahead:
-                        if successor.item not in result:
-                            if successor.item.lr_index < len(successor.item.prod) - 1 and successor.item.prod[successor.item.lr_index+1] == lookahead:
-                                extension = LRPath(successor, [], use_marker=False)
+                        if successor.item.lr_index < len(successor.item.prod) - 1 and successor.item.prod[successor.item.lr_index+1] == lookahead:
+                            extension = LRPath(successor, [], use_marker=False)
+                            extension = extension.derive_from(self, reduced_lookahead)
+                            extension = extension.expand(0, path)
+                            result[self.item_set] = (extension, None)
+                            return
+                        for follower in successor.successors:
+                            if follower.item.lr_index < len(follower.item.prod) - 1 and follower.item.prod[follower.item.lr_index+1] == lookahead:
+                                # todo: expand the lookahead production if it is not a terminal
+                                extension = LRPath(successor, [])
                                 extension = extension.derive_from(self, reduced_lookahead)
                                 extension = extension.expand(0, path)
-                                result[successor.item] = extension
-                        for follower in successor.successors:
-                            if successor.item not in result:
-                                if follower.item.lr_index < len(follower.item.prod) - 1 and follower.item.prod[follower.item.lr_index+1] == lookahead:
-                                    # todo: expand the lookahead?
-                                    extension = LRPath(successor, [])
-                                    extension = extension.derive_from(self, reduced_lookahead)
-                                    extension = extension.expand(0, path)
-                                    result[successor.item] = extension
+                                result[self.item_set] = (extension, None)
+                                return
+                for pred in self.direct_predecessors:
+                    if pred.item_set == self.item_set:
+                        pred.backtrack_reduce(result, path.derive_from(pred, None), 1, state_count, self.item.name, lookahead, seen)
             else:
-                # path already contains expansion beyon the lookahead
+                # path already contains expansion beyond the lookahead
                 for successor in self.direct_successors:
                     if successor.direct_predecessors[self] == reduced_lookahead:
                         if successor.item.lr_index < len(successor.item.prod) - 1 and successor.item.prod[successor.item.lr_index+1] == lookahead:
-                            if successor.item not in result:
-                                result[successor.item] = path
+                            result[self.item_set] = (path, None)
+                            return
                         for follower in successor.successors:
                             if follower.item.lr_index < len(follower.item.prod) - 1 and follower.item.prod[follower.item.lr_index+1] == lookahead:
                                 if successor.item not in result:
-                                    # todo: expand the lookahead?
-                                    result[successor.item] = path
+                                    # todo: expand the lookahead production if it is not a terminal
+                                    result[self.item_set] = (path, None)
+                                    return
         else:
             for pred, la in self.direct_predecessors.items():
                 if pred.item_set == self.item_set and pred != self:
@@ -446,19 +457,21 @@ class LRDominanceNode(object):
                 else:
                     pred.backtrack_reduce(result, path.derive_from(pred, la), reduce_size, state_count-1, self.item.name, lookahead, set([]))
 
-    def backtrack_shift(self, result, path, state_count, reduce_states, seen):
+    def backtrack_shift(self, result, path, state_count, seen):
         if self in seen:
             return
         seen.add(self)
         if state_count == 0:
-            if self.item_set in reduce_states:
-                result[self.item] = path
+            try:
+                result[self.item_set] = (result[self.item_set][0], path)
+            except KeyError:
+                pass
         else:
             for pred, la in self.direct_predecessors.items():
                 if pred.item_set == self.item_set:
-                    pred.backtrack_shift(result, path.derive_from(pred, la), state_count, reduce_states, seen)
+                    pred.backtrack_shift(result, path.derive_from(pred, la), state_count, seen)
                 else:
-                    pred.backtrack_shift(result, path.derive_from(pred, la), state_count-1, reduce_states, set([]))
+                    pred.backtrack_shift(result, path.derive_from(pred, la), state_count-1, set([]))
 
     def find_split(self, path, common_predecessors, outside_predecessors, seen):
         if self in seen:
@@ -472,13 +485,13 @@ class LRDominanceNode(object):
             if pred.item_set == self.item_set:
                 if pred in common_predecessors:
                     # this node is the direct successor of a split; stop recursion here
-                    result.append(path.derive_from(pred, lookahead))
+                    result.append(path)
                 else:
                     result += pred.find_split(
                         path.derive_from(pred, lookahead), common_predecessors, outside_predecessors, seen
                     )
             else:
-                # register predecessors from other state for the callerr to recurse into
+                # register predecessors from other state for the caller to recurse into
                 try:
                     outside_predecessors[pred].add(path.derive_from(pred, lookahead))
                 except KeyError:
@@ -497,6 +510,7 @@ class LRItemSet(object):
     _ADD_COUNT = 0
 
     def __init__(self, core):
+        self._core = set([])
         self._items = {}
         self.add_core(core)
         self._lr0_close()
@@ -512,6 +526,7 @@ class LRItemSet(object):
 
     def add_core(self, core):
         for item, node, lookahead in core:
+            self._core.add(node)
             try:
                 target_node = self._items[item]
             except KeyError:
@@ -1740,33 +1755,63 @@ class LRTable(object):
             goto[st] = st_goto
             self.state_descriptions[st] = '\n'.join(descrip)
 
+    def _log(self, conflict_paths, out):
+        if conflict_paths:
+            conflict_paths = set(conflict_paths)
+            out.append(' \u256d')
+            for i, path in enumerate(conflict_paths):
+                strings = path.expand_left().to_string()[0]
+                for s in strings:
+                    out.append(f' \u2502 {s}')
+                if i == len(conflict_paths) - 1:
+                    out.append(' \u2570')
+                else:
+                    out.append(' \u250a')
+            out.append('')
+
     def _log_shiftreduce_counterexamples(self, shift_node, reduce_node, lookahead, out):
         dom_nodes = {}
 
+        conflict_paths = {}
         # rewind nodes to reduce state
-        root_reduce_paths = {}
-        root_shift_paths = {}
-        reduce_node.backtrack_reduce(root_reduce_paths, LRPath(reduce_node, []), reduce_node.item.lr_index,
+        reduce_node.backtrack_reduce(conflict_paths, LRPath(reduce_node, []), reduce_node.item.lr_index,
                                      reduce_node.item.lr_index, reduce_node.item.name, lookahead, set([]))
-        for path in root_reduce_paths.values():
-            try:
-                dom_nodes[path._node.item_set][path._node] = path
-            except KeyError:
-                dom_nodes[path._node.item_set] = { path._node: path }
-        shift_node.backtrack_shift(root_shift_paths, LRPath(shift_node, []), reduce_node.item.lr_index, dom_nodes, set([]))
+        shift_node.backtrack_shift(conflict_paths, LRPath(shift_node, []), reduce_node.item.lr_index, set([]))
 
-        # shift paths and reduce paths can overlap;
-        # make sure reduce_path is readded into the dictionary if it was stomped
-        for path in list(root_shift_paths.values()) + list(root_reduce_paths.values()):
-            try:
-                dom_nodes[path._node.item_set][path._node] = path
-            except KeyError:
-                dom_nodes[path._node.item_set] = { path._node: path }
-        self._log_reducereduce_counterexamples(dom_nodes, out)
+        seen = set([])
+        for reduce_path, shift_path in list(conflict_paths.values()):
+            if reduce_path._node.item in seen:
+                continue
+            seen.add(reduce_path._node.item)
+            if reduce_path._node == shift_path._node:
+                self._log((reduce_path, shift_path), out)
+            else:
+                # find a split node above the shift and the reduce node. At this stage,
+                # exclude the reduce subtree from the shift tree
+                new_items = {}
+                common_predecessors = set(shift_path._node.predecessors)
+                common_predecessors.add(shift_path._node)
+                try:
+                    common_predecessors.remove(reduce_path._node)
+                except KeyError:
+                    pass
+                common_predecessors.intersection_update(reduce_path._node.predecessors.union([reduce_path._node]))
+                conflict_paths = shift_path._node.find_split(shift_path, common_predecessors, new_items, set([reduce_path._node]))
+                conflict_paths += reduce_path._node.find_split(reduce_path, common_predecessors, new_items, set([]))
+                self._log(conflict_paths, out)
+                for node, predecessors in new_items.items():
+                    if len(predecessors) == 1:
+                        try:
+                            dom_node_group = dom_nodes[node.item_set]
+                        except KeyError:
+                            dom_nodes[node.item_set] = {node: predecessors.pop()}
+                        else:
+                            dom_node_group[node] = predecessors.pop()
+                    else:
+                        assert False
+                self._log_reducereduce_counterexamples(dom_nodes, out, set(conflict_paths))
 
-
-
-    def _log_reducereduce_counterexamples(self, dom_nodes, out):
+    def _log_reducereduce_counterexamples(self, dom_nodes, out, log_cache):
         seen = set([])
         while dom_nodes:
             group, dom_node_group = dom_nodes.popitem()
@@ -1790,9 +1835,9 @@ class LRTable(object):
             conflict_paths = []
             for node, path in dom_node_group.items():
                 conflict_paths += node.find_split(path, common_predecessors, new_items, set([]))
-            for path in conflict_paths:
-                out += path.expand_left().to_string()[0]
-
+            conflict_paths = [path for path in conflict_paths if path not in log_cache]
+            log_cache.update(conflict_paths)
+            self._log(conflict_paths, out)
             for node, predecessors in new_items.items():
                 if len(predecessors) == 1:
                     try:
@@ -1803,7 +1848,6 @@ class LRTable(object):
                         dom_node_group[node] = predecessors.pop()
                 #else:
                 #    assert False
-        out.append('')
 
     # ----------------------------------------------------------------------
     # Debugging output.   Printing the LRTable object will produce a listing
@@ -1834,7 +1878,7 @@ class LRTable(object):
                 already_reported.add((state, id(rule), id(rejected)))
                 dom_nodes = { node.item_set: { node: LRPath(node, []),
                                                rejected_node: LRPath(rejected_node, None) } }
-                self._log_reducereduce_counterexamples(dom_nodes, out)
+                self._log_reducereduce_counterexamples(dom_nodes, out, set([]))
 
             warned_never = set()
             for state, rule, rejected, node, rejected_node in self.rr_conflicts:
