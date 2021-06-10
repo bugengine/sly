@@ -38,6 +38,7 @@ class CalcLexer(Lexer):
 class CalcParser(Parser):
     tokens = CalcLexer.tokens
     debugfile = 'calc.out'
+    dotfile = "calc.dot"
 
     #precedence = (
     #    ('left', PLUS, MINUS),
@@ -56,11 +57,8 @@ class CalcParser(Parser):
     def statement(self, p):
         print(p.expr)
 
-    @_('expr PLUS expr')
-    @_('expr MINUS expr')
     @_('expr TIMES expr')
     @_('expr DIVIDE expr')
-    @_('MINUS expr')
     def expr(self, p):
         return p.expr0 + p.expr1
 

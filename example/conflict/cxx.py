@@ -5,13 +5,9 @@ import sly
 
 class CxxLexer(sly.Lexer):
     tokens = [
-        "line-comment",
-        "block-comment",
         "floating-literal",
         "identifier",
         "integer-literal",
-        "preprocessor",
-        "whitespace",
         "string-literal",
     ]
     literals = {
