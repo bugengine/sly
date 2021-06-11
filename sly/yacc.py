@@ -412,10 +412,11 @@ class LRDominanceNode(object):
         for p in predecessors.items():
             p[0].direct_successors[self] = p[1]
 
-    def find_lookahead(self, path, lookahead):
+    def find_lookahead(self, path, lookahead, seen):
         # this method will go into the shift tree to find a sequence that starts with "lookahead".
         if len(self.item.prod) == self.item.lr_index + 1:
             return [(path, True)]
+        # TODO: this method should expand items in the path to make the path easier to understand.
         result = []
         for successor, la in self.direct_successors.items():
             if la == lookahead:
@@ -423,32 +424,35 @@ class LRDominanceNode(object):
                 result.append((path, False))
             elif la == None:
                 # node can be expanded, so check expansions
-                # TODO: path?
-                intermediate_result = successor.find_lookahead(path, lookahead)
+                if (self, successor) in seen:
+                    continue
+                seen.add((self, successor))
+                intermediate_result = successor.find_lookahead(path, lookahead, seen)
                 for p, can_expand in intermediate_result:
                     if can_expand:
                         for successor, la in self.direct_successors.items():
                             if la == self.item.prod[self.item.lr_index + 1]:
-                                result += successor.find_lookahead(path, lookahead)
+                                result += successor.find_lookahead(path, lookahead, seen)
                     else:
                         # todo: path manipulation
                         result.append((p, False))
         return result
 
 
-    def backtrack_reduce(self, path, reduce_size, state_count, reduce_lookahead, shift_lookahead):
+    def backtrack_reduce(self, path, reduce_size, reduce_lookahead, shift_lookahead):
         # this method will go up the reduce stack and look for items that follow by shifting lookahead
         result = []
-        queue = [(self, path, reduce_size, state_count, reduce_lookahead)]
+        queue = [(self, path, reduce_size, None, reduce_lookahead)]
         priorities = [(0, 0)]
-        seen = set([])
+        reduce_seen = set([])
+        shift_seen = set([])
         while queue:
-            node, path, reduce_size, state_count, reduce_lookahead = queue.pop(0)
+            node, path, reduce_size, origin, reduce_lookahead = queue.pop(0)
             depth, subdepth = priorities.pop(0)
             
-            if (node, reduce_lookahead) in seen:
+            if (node, subdepth != 0, origin) in reduce_seen:
                 continue
-            seen.add((node, reduce_lookahead))
+            reduce_seen.add((node, subdepth != 0, origin))
             if depth == reduce_size:
                 if subdepth > 0:
                     assert len(node.item.prod) > node.item.lr_index+1
@@ -458,34 +462,38 @@ class LRDominanceNode(object):
                         if successor.item_set != node.item_set:
                             assert successor.direct_predecessors[node] == reduce_lookahead
                             # this is the node after the shift. Look for the lookahead
-                            for result_path, can_reduce in successor.find_lookahead(path, shift_lookahead):
+                            if (node, successor) in shift_seen:
+                                # we have already tried to expand this, a new try will not ucover more lookaheads.
+                                continue
+                            shift_seen.add((node, successor))
+
+                            for result_path, can_reduce in successor.find_lookahead(path, shift_lookahead, set([])):
                                 if can_reduce:
                                     # after shifting the reduce_lookahead, a new reduction can happen.
                                     # the reduce will climb up again, going through node
                                     # node is already one level higher than this successor
+                                    # item set is "reentered" from this edge
                                     new_reduce_size = depth + len(successor.item.prod) - 2
-                                    for predecessor, lookahead in node.direct_predecessors.items():
-                                        if lookahead is None:
-                                            index = bisect.bisect_right(priorities, (depth, subdepth + 1))
-                                            queue.insert(index, (successor, result_path.derive_from(successor, None), new_reduce_size, state_count, successor.item.name))
-                                            priorities.insert(index, (depth, subdepth + 1))
+                                    index = bisect.bisect_right(priorities, (depth, 0))
+                                    queue.insert(index, (node, path, new_reduce_size, successor, successor.item.name))
+                                    priorities.insert(index, (depth, 0))
                                 else:
                                     result.append((result_path, depth))
                 else:
                     for predecessor, lookahead in node.direct_predecessors.items():
                         if lookahead is None:
                             index = bisect.bisect_right(priorities, (depth, subdepth + 1))
-                            queue.insert(index, (predecessor, path.derive_from(predecessor, None), reduce_size, state_count, reduce_lookahead))
+                            queue.insert(index, (predecessor, path.derive_from(predecessor, None), reduce_size, origin, reduce_lookahead))
                             priorities.insert(index, (depth, subdepth + 1))
             else:
                 for predecessor, lookahead in node.direct_predecessors.items():
                     if lookahead is None:
                         index = bisect.bisect_right(priorities, (depth, subdepth + 1))
-                        queue.insert(index, (predecessor, path.derive_from(predecessor, None), reduce_size, state_count, reduce_lookahead))
+                        queue.insert(index, (predecessor, path.derive_from(predecessor, None), reduce_size, origin, reduce_lookahead))
                         priorities.insert(index, (depth, subdepth + 1))
                     else:
                         index = bisect.bisect_right(priorities, (depth + 1, 0))
-                        queue.insert(index, (predecessor, path.derive_from(predecessor, lookahead), reduce_size, state_count, reduce_lookahead))
+                        queue.insert(index, (predecessor, path.derive_from(predecessor, lookahead), reduce_size, origin, reduce_lookahead))
                         priorities.insert(index, (depth + 1, 0))
         return result
 
@@ -1840,12 +1848,10 @@ class LRTable(object):
         conflict_paths = {}
         # rewind nodes to reduce state
         reduce_paths = reduce_node.backtrack_reduce(LRPath(reduce_node, []), reduce_node.item.lr_index,
-                                                    reduce_node.item.lr_index, reduce_node.item.name,
-                                                    lookahead)
+                                                    reduce_node.item.name, lookahead)
         if len(reduce_paths) == 0:
-            reduce_paths = reduce_node.backtrack_reduce(LRPath(reduce_node, []), reduce_node.item.lr_index,
-                                                        reduce_node.item.lr_index, reduce_node.item.name,
-                                                        lookahead)
+             reduce_paths = reduce_node.backtrack_reduce(LRPath(reduce_node, []), reduce_node.item.lr_index,
+                                                        reduce_node.item.name, lookahead)
 
         for reduce_path, depth in reduce_paths:
             shift_paths = shift_node.backtrack_shift(reduce_path._node, LRPath(shift_node, []), depth, set([]))
