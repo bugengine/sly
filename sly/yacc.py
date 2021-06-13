@@ -439,20 +439,21 @@ class LRDominanceNode(object):
         return result
 
 
-    def backtrack_reduce(self, path, reduce_size, reduce_lookahead, shift_lookahead):
+    def backtrack_reduce(self, reduce_path, shift_path, shift_lookahead):
         # this method will go up the reduce stack and look for items that follow by shifting lookahead
         result = []
-        queue = [(self, path, reduce_size, None, reduce_lookahead)]
+        queue = [(self, reduce_path, shift_path, None, self._node.item.name. shift_lookahead)]
         priorities = [(0, 0)]
         reduce_seen = set([])
         shift_seen = set([])
         while queue:
-            node, path, reduce_size, origin, reduce_lookahead = queue.pop(0)
+            node, path, shift_path, reduce_size, origin, reduce_lookahead = queue.pop(0)
             depth, subdepth = priorities.pop(0)
-            
-            if (node, subdepth != 0, origin) in reduce_seen:
+
+            # subdepth != 0 => allow reentering the same node for a reduce, but not for multiple reduce
+            if (node, subdepth != 0) in reduce_seen:
                 continue
-            reduce_seen.add((node, subdepth != 0, origin))
+            reduce_seen.add((node, subdepth != 0))
             if depth == reduce_size:
                 if subdepth > 0:
                     assert len(node.item.prod) > node.item.lr_index+1
@@ -466,6 +467,7 @@ class LRDominanceNode(object):
                                 # we have already tried to expand this, a new try will not ucover more lookaheads.
                                 continue
                             shift_seen.add((node, successor))
+                            found = False
 
                             for result_path, can_reduce in successor.find_lookahead(path, shift_lookahead, set([])):
                                 if can_reduce:
@@ -475,69 +477,97 @@ class LRDominanceNode(object):
                                     # item set is "reentered" from this edge
                                     new_reduce_size = depth + len(successor.item.prod) - 2
                                     index = bisect.bisect_right(priorities, (depth, 0))
-                                    queue.insert(index, (node, path, new_reduce_size, successor, successor.item.name))
+                                    queue.insert(index, (node, path, shift_path, new_reduce_size, successor, successor.item.name))
                                     priorities.insert(index, (depth, 0))
-                                else:
-                                    result.append((result_path, depth))
+                                elif not found:
+                                    found = True
+                                    while len(result) < depth+1:
+                                        result.append({})
+                                    try:
+                                        result[depth][node.item_set].append((result_path, shift_path))
+                                    except KeyError:
+                                        result[depth][node.item_set] = [(result_path, shift_path)]
                 else:
                     for predecessor, lookahead in node.direct_predecessors.items():
                         if lookahead is None:
                             index = bisect.bisect_right(priorities, (depth, subdepth + 1))
-                            queue.insert(index, (predecessor, path.derive_from(predecessor, None), reduce_size, origin, reduce_lookahead))
+                            queue.insert(index, (predecessor, path.derive_from(predecessor, None), shift_path, reduce_size, origin, reduce_lookahead))
                             priorities.insert(index, (depth, subdepth + 1))
             else:
                 for predecessor, lookahead in node.direct_predecessors.items():
                     if lookahead is None:
                         index = bisect.bisect_right(priorities, (depth, subdepth + 1))
-                        queue.insert(index, (predecessor, path.derive_from(predecessor, None), reduce_size, origin, reduce_lookahead))
+                        queue.insert(index, (predecessor, path.derive_from(predecessor, None), shift_path, reduce_size, origin, reduce_lookahead))
                         priorities.insert(index, (depth, subdepth + 1))
                     else:
-                        index = bisect.bisect_right(priorities, (depth + 1, 0))
-                        queue.insert(index, (predecessor, path.derive_from(predecessor, lookahead), reduce_size, origin, reduce_lookahead))
-                        priorities.insert(index, (depth + 1, 0))
+                        new_shift_path = shift_path._node.backtrack_node(shift_path, lookahead, predecessor.item_set)
+                        if new_shift_path is not None:
+                            index = bisect.bisect_right(priorities, (depth + 1, 0))
+                            queue.insert(index, (predecessor, path.derive_from(predecessor, lookahead), new_shift_path, reduce_size, origin, reduce_lookahead))
+                            priorities.insert(index, (depth + 1, 0))
+                        else:
+                            shift_path._node.backtrack_node(shift_path, lookahead, predecessor.item_set)
         return result
 
-    def backtrack_shift(self, backtrack_node, path, state_count, seen):
-        if self in seen:
-            return []
-        seen.add(self)
-        if state_count == 0:
-            if backtrack_node.item_set == self.item_set:
-                return [path]
-            else:
-                return []
-        else:
-            result = []
-            for pred, la in self.direct_predecessors.items():
-                if pred.item_set == self.item_set:
-                    result += pred.backtrack_shift(backtrack_node, path.derive_from(pred, la), state_count, seen)
-                else:
-                    result += pred.backtrack_shift(backtrack_node, path.derive_from(pred, la), state_count-1, set([]))
-            return result
+    def backtrack_node(self, path, lookahead, state):
+        # this method will find the predecessors coming from the specified state, following the specified lookahead
+        queue = [(self, path)]
+        seen = set([])
 
-    def find_split(self, path, common_predecessors, outside_predecessors, seen):
+        while queue:
+            node, path = queue.pop(0)
+            if node in seen:
+                continue
+            seen.add(node)
+            for predecessor, la in node.direct_predecessors.items():
+                if la is None:
+                    queue.append((predecessor, path.derive_from(predecessor, None)))
+                elif la == lookahead and predecessor.item_set == state:
+                    return path.derive_from(predecessor, la)
+        return None
+
+    def backtrack_shift(self, backtrack_nodes, path, state_count, seen, add=True):
         if self in seen:
-            return []
-        if self in common_predecessors:
-            return [path]
+            return
         seen.add(self)
+
+        if add:
+            try:
+                backtrack_nodes[0][self.item_set][1].append(path)
+            except KeyError:
+                pass
+        for pred, la in self.direct_predecessors.items():
+            if pred.item_set == self.item_set:
+                pred.backtrack_shift(backtrack_nodes, path.derive_from(pred, la), state_count, seen, False)
+            elif state_count > 0:
+                pred.backtrack_shift(backtrack_nodes[1:], path.derive_from(pred, la), state_count-1, set([]), True)
+
+    def find_split(self, path, common_predecessors, outside_predecessors):
+        queue = [(self, path)]
+        seen = set([])
         result = []
 
-        for pred, lookahead in self.direct_predecessors.items():
-            if pred.item_set == self.item_set:
-                if pred in common_predecessors:
-                    # this node is the direct successor of a split; stop recursion here
-                    result.append(path)
+        while queue:
+            node, path = queue.pop(0)
+            if node in seen:
+                continue
+            seen.add(node)
+            if node in common_predecessors:
+                result.append(path)
+            
+            for pred, lookahead in node.direct_predecessors.items():
+                if pred.item_set == self.item_set:
+                    if pred in common_predecessors:
+                        # this node is the direct successor of a split; stop recursion here
+                        result.append(path)
+                    else:
+                        queue.append((pred, path.derive_from(pred, None)))
                 else:
-                    result += pred.find_split(
-                        path.derive_from(pred, lookahead), common_predecessors, outside_predecessors, seen
-                    )
-            else:
-                # register predecessors from other state for the caller to recurse into
-                try:
-                    outside_predecessors[pred].add(path.derive_from(pred, lookahead))
-                except KeyError:
-                    outside_predecessors[pred] = set([path.derive_from(pred, lookahead)])
+                    # register predecessors from other state for the caller to recurse into
+                    try:
+                        outside_predecessors[pred.item_set].append(path.derive_from(pred, lookahead))
+                    except KeyError:
+                        outside_predecessors[pred.item_set] = [path.derive_from(pred, lookahead)]
         return result
 
 # -----------------------------------------------------------------------------
@@ -722,8 +752,8 @@ class Grammar(object):
         for n, s in enumerate(syms):
             if s[0] in "'\"" and s[0] == s[-1]:
                 c = s[1:-1]
-                #if (len(c) != 1):
-                #    raise GrammarError(f'{file}:{line}: Literal token {s} in rule {prodname!r} may only be a single character')
+                if (len(c) != 1):
+                    raise GrammarError(f'{file}:{line}: Literal token {s} in rule {prodname!r} may only be a single character')
                 if c not in self.Terminals:
                     self.Terminals[c] = []
                 syms[n] = c
@@ -1842,59 +1872,57 @@ class LRTable(object):
                     out.append(' \u250a')
             out.append('')
 
-    def _log_shiftreduce_counterexamples(self, shift_node, reduce_node, lookahead, out):
-        dom_nodes = {}
+    def _search_reduce_counterexamples(conflict_shift_paths, conflict_reduce_paths, lookahead):
+        # search for a common node where reduce paths are followed by the lookahead
+        return conflict_shift_paths, conflict_reduce_paths
 
-        conflict_paths = {}
-        # rewind nodes to reduce state
-        reduce_paths = reduce_node.backtrack_reduce(LRPath(reduce_node, []), reduce_node.item.lr_index,
-                                                    reduce_node.item.name, lookahead)
-        if len(reduce_paths) == 0:
-             reduce_paths = reduce_node.backtrack_reduce(LRPath(reduce_node, []), reduce_node.item.lr_index,
-                                                        reduce_node.item.name, lookahead)
-
-        for reduce_path, depth in reduce_paths:
-            shift_paths = shift_node.backtrack_shift(reduce_path._node, LRPath(shift_node, []), depth, set([]))
-            if len(shift_paths) > 0:
-                conflict_paths[reduce_path._node.item_set] = (reduce_path, shift_paths[0])
-            else:
-                pass
-
-
+    def _log_shiftreduce_counterexamples(self, node_map, lookahead, out):
         seen = set([])
-        for reduce_path, shift_path in list(conflict_paths.values()):
-            if shift_path is None:
+        while node_map:
+            group, (shift_paths, reduce_paths) = node_map.popitem()
+            if group in seen:
                 continue
-            if reduce_path._node.item in seen:
+            if len(shift_paths) == 0:
                 continue
-            seen.add(reduce_path._node.item)
-            if reduce_path._node == shift_path._node:
-                self._log((reduce_path, shift_path), out)
-            else:
-                # find a split node above the shift and the reduce node. At this stage,
-                # exclude the reduce subtree from the shift tree
-                new_items = {}
-                common_predecessors = set(shift_path._node.predecessors)
-                common_predecessors.add(shift_path._node)
+            if len(reduce_paths) == 0:
+                continue
+            seen.add(group)
+            common_predecessors = set(shift_paths[0]._node.predecessors)
+            common_predecessors.add(shift_paths[0]._node)
+            for p in shift_paths[1:]:
+                common_predecessors.intersection_update(p._node.predecessors.union([p._node]))
+            for p in reduce_paths:
+                common_predecessors.intersection_update(p._node.predecessors.union([p._node]))
+            
+            new_shift_items = {}
+            new_reduce_items = {}
+            conflict_shift_paths = []
+            conflict_reduce_paths = []
+            for shift_path in shift_paths:
+                conflict_shift_paths += shift_path._node.find_split(shift_path, common_predecessors, new_shift_items)
+            for reduce_path in reduce_paths:
+                conflict_reduce_paths += reduce_path._node.find_split(reduce_path, common_predecessors, new_reduce_items)
+
+            #conflict_shift_paths, conflict_reduce_paths = self._search_reduce_counterexamples(conflict_shift_paths,
+            #                                                                                  conflict_reduce_paths,
+            #                                                                                  lookahead)
+            self._log(conflict_shift_paths, out)
+            self._log(conflict_reduce_paths, out)
+            
+                
+            for state, shift_paths in new_shift_items.items():
                 try:
-                    common_predecessors.remove(reduce_path._node)
+                    reduce_paths = new_reduce_items[state]
                 except KeyError:
-                    pass
-                common_predecessors.intersection_update(reduce_path._node.predecessors.union([reduce_path._node]))
-                conflict_paths = shift_path._node.find_split(shift_path, common_predecessors, new_items, set([reduce_path._node]))
-                conflict_paths += reduce_path._node.find_split(reduce_path, common_predecessors, new_items, set([]))
-                self._log(conflict_paths, out)
-                for node, predecessors in new_items.items():
-                    if len(predecessors) == 1:
-                        try:
-                            dom_node_group = dom_nodes[node.item_set]
-                        except KeyError:
-                            dom_nodes[node.item_set] = {node: predecessors.pop()}
-                        else:
-                            dom_node_group[node] = predecessors.pop()
+                    continue
+                else:
+                    try:
+                        s_p, r_p = node_map[state]
+                    except KeyError:
+                        node_map[state] = (shift_paths, reduce_paths)
                     else:
-                        assert False
-                self._log_reducereduce_counterexamples(dom_nodes, out, set(conflict_paths))
+                        s_p.extend(shift_paths)
+                        r_p.extend(reduce_paths)
 
     def _log_reducereduce_counterexamples(self, dom_nodes, out, log_cache):
         seen = set([])
@@ -1948,10 +1976,9 @@ class LRTable(object):
 
             for state, tok, resolution, shift_node, reduce_node in self.sr_conflicts:
                 out.append(f'shift/reduce conflict for {tok} in state {state} resolved as {resolution}')
-                self._log_shiftreduce_counterexamples(shift_node, reduce_node, tok, out)
-                #dom_nodes = { shift_node.item_set: { shift_node: LRPath(shift_node, None),
-                #                               reduce_node: LRPath(reduce_node, None) } }
-                #self._log_reducereduce_counterexamples(dom_nodes, out)
+                #self._log_shiftreduce_counterexamples(shift_node, reduce_node, tok, out)
+                dom_nodes = { shift_node.item_set: ([LRPath(shift_node, None)], [LRPath(reduce_node, None)]) }
+                self._log_shiftreduce_counterexamples(dom_nodes, tok, out)
 
 
             already_reported = set()
@@ -1963,7 +1990,7 @@ class LRTable(object):
                 already_reported.add((state, id(rule), id(rejected)))
                 dom_nodes = { node.item_set: { node: LRPath(node, []),
                                                rejected_node: LRPath(rejected_node, None) } }
-                self._log_reducereduce_counterexamples(dom_nodes, out, set([]))
+                #self._log_reducereduce_counterexamples(dom_nodes, out, set([]))
 
             warned_never = set()
             for state, rule, rejected, node, rejected_node in self.rr_conflicts:
@@ -2347,7 +2374,7 @@ class Parser(metaclass=ParserMeta):
         unused_terminals = grammar.unused_terminals()
         if unused_terminals:
             unused_str = '{' + ','.join(unused_terminals) + '}'
-            cls.log.warning(f'Token{"(s)" if len(unused_terminals) >1 else ""} {unused_str} defined, but not used')
+            cls.log.warning(f'Token{"(s)" if len(unused_terminals) >1 else ""} %s defined, but not used', unused_str)
 
         unused_rules = grammar.unused_rules()
         for prod in unused_rules:

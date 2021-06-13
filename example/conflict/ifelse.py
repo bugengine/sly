@@ -35,6 +35,7 @@ class IfElseLexer(Lexer):
 class IfElseParser(Parser):
     tokens = IfElseLexer.tokens
     debugfile = 'ifelse.out'
+    dotfile = 'ifelse.dot'
 
     #precedence = (
     #    ('left', ELSE),
@@ -47,19 +48,9 @@ class IfElseParser(Parser):
     def prog(self, p):
         pass
 
-    @_('attribute_seq if_statement')
+    @_('if_statement')
     def statement(self, p):
         pass
-
-    @_('attribute_seq attribute')
-    @_('')
-    def attribute_seq(self, p):
-        pass
-
-    @_('IDENTIFIER')
-    def attribute(self, p):
-        pass
-
 
     @_('IF LPAREN expr RPAREN statement')
     def if_statement(self, p):

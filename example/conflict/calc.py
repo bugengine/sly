@@ -58,7 +58,6 @@ class CalcParser(Parser):
         print(p.expr)
 
     @_('expr TIMES expr')
-    @_('expr DIVIDE expr')
     def expr(self, p):
         return p.expr0 + p.expr1
 
