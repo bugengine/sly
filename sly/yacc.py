@@ -598,13 +598,13 @@ class LRItemSet(object):
 
     def add_core(self, core):
         for item, node, lookahead in core:
-            self._core.add(node)
             try:
                 target_node = self._items[item]
             except KeyError:
                 target_node = LRDominanceNode(self, item, {node: lookahead})
                 self._items[item] = target_node
             else:
+                self._core.add(target_node)
                 target_node.direct_predecessors[node] = lookahead
                 node.direct_successors[target_node] = lookahead
 
@@ -1858,10 +1858,11 @@ class LRTable(object):
                     else:
                         self.edge_description += [f'    {id(predecessor)}->{id(node)}[label="{lookahead}"];']
 
-    def _log(self, conflict_paths, out):
+    def _log(self, title, conflict_paths, out):
         if conflict_paths:
             conflict_paths = set(conflict_paths)
-            out.append(' \u256d')
+            out.append(f' \u256d {title}')
+            out.append(' \u250a')
             for i, path in enumerate(conflict_paths):
                 strings = path.expand_left().to_string()[0]
                 for s in strings:
@@ -1876,91 +1877,66 @@ class LRTable(object):
         # search for a common node where reduce paths are followed by the lookahead
         return conflict_shift_paths, conflict_reduce_paths
 
-    def _log_shiftreduce_counterexamples(self, node_map, lookahead, out):
+    def _log_counterexamples(self, node_map, example_1, example_2, lookahead, out):
         seen = set([])
+        conflict_r1_paths = []
+        conflict_r2_paths = []
         while node_map:
-            group, (shift_paths, reduce_paths) = node_map.popitem()
+            group, (r1_paths, r2_paths) = node_map.popitem()
             if group in seen:
                 continue
-            if len(shift_paths) == 0:
+            if len(r1_paths) == 0:
                 continue
-            if len(reduce_paths) == 0:
+            if len(r2_paths) == 0:
                 continue
             seen.add(group)
-            common_predecessors = set(shift_paths[0]._node.predecessors)
-            common_predecessors.add(shift_paths[0]._node)
-            for p in shift_paths[1:]:
+            common_predecessors = set(r1_paths[0]._node.predecessors)
+            common_predecessors.add(r1_paths[0]._node)
+            for p in r1_paths[1:]:
                 common_predecessors.intersection_update(p._node.predecessors.union([p._node]))
-            for p in reduce_paths:
+            for p in r2_paths:
                 common_predecessors.intersection_update(p._node.predecessors.union([p._node]))
             
-            new_shift_items = {}
-            new_reduce_items = {}
-            conflict_shift_paths = []
-            conflict_reduce_paths = []
-            for shift_path in shift_paths:
-                conflict_shift_paths += shift_path._node.find_split(shift_path, common_predecessors, new_shift_items)
-            for reduce_path in reduce_paths:
-                conflict_reduce_paths += reduce_path._node.find_split(reduce_path, common_predecessors, new_reduce_items)
+            new_r1_items = {}
+            new_r2_items = {}
+            for r1_path in r1_paths:
+                conflict_r1_paths_tmp = r1_path._node.find_split(r1_path, common_predecessors, new_r1_items)
+            for r2_path in r2_paths:
+                conflict_r2_paths_tmp = r2_path._node.find_split(r2_path, common_predecessors, new_r2_items)
+            if lookahead:
+                rewind = 0
+                # make sure to go back to the origin of the reduce option (r2)
+                for p in conflict_r2_paths_tmp:
+                    rewind = max(rewind, p._node.item.lr_index)
+                # go back X states up. Shift paths will always take the shortest items to follow reduce paths.
+                # TODO
+
+                # now that reduce paths are in the correct state, look for the rules that follow with the lookahead.
+                # Same rules apply, shift paths will take the shortest items to follow reduce paths.
+                # TODO
+            conflict_r1_paths += conflict_r1_paths_tmp
+            conflict_r2_paths += conflict_r2_paths_tmp
 
             #conflict_shift_paths, conflict_reduce_paths = self._search_reduce_counterexamples(conflict_shift_paths,
             #                                                                                  conflict_reduce_paths,
             #                                                                                  lookahead)
-            self._log(conflict_shift_paths, out)
-            self._log(conflict_reduce_paths, out)
-            
-                
-            for state, shift_paths in new_shift_items.items():
+
+            for state, r1_paths in new_r1_items.items():
                 try:
-                    reduce_paths = new_reduce_items[state]
+                    r2_paths = new_r2_items[state]
                 except KeyError:
                     continue
                 else:
                     try:
                         s_p, r_p = node_map[state]
                     except KeyError:
-                        node_map[state] = (shift_paths, reduce_paths)
+                        node_map[state] = (r1_paths, r2_paths)
                     else:
-                        s_p.extend(shift_paths)
-                        r_p.extend(reduce_paths)
-
-    def _log_reducereduce_counterexamples(self, dom_nodes, out, log_cache):
-        seen = set([])
-        while dom_nodes:
-            group, dom_node_group = dom_nodes.popitem()
-            if group in seen:
-                continue
-            if len(dom_node_group) < 2:
-                continue
-            seen.add(group)
-            # find all predecessors of each items, divide them in two sets
-            #  - sets of nodes outside this group leading to one of the conflict nodes
-            #  - sets of nodes inside this group leading to all of the conflict nodes
-            node, path = dom_node_group.popitem()
-            common_predecessors = set(node.predecessors)
-            common_predecessors.add(node)
-
-            for node2, _ in dom_node_group.items():
-                common_predecessors.intersection_update(node2.predecessors.union([node2]))
-            dom_node_group[node] = path
-
-            new_items = {}
-            conflict_paths = []
-            for node, path in dom_node_group.items():
-                conflict_paths += node.find_split(path, common_predecessors, new_items, set([]))
-            conflict_paths = [path for path in conflict_paths if path not in log_cache]
-            log_cache.update(conflict_paths)
-            self._log(conflict_paths, out)
-            for node, predecessors in new_items.items():
-                if len(predecessors) == 1:
-                    try:
-                        dom_node_group = dom_nodes[node.item_set]
-                    except KeyError:
-                        dom_nodes[node.item_set] = {node: predecessors.pop()}
-                    else:
-                        dom_node_group[node] = predecessors.pop()
-                #else:
-                #    assert False
+                        s_p.extend(r1_paths)
+                        r_p.extend(r2_paths)
+        self._log(example_1, conflict_r1_paths, out)
+        self._log(example_2, conflict_r2_paths, out)
+        
 
     # ----------------------------------------------------------------------
     # Debugging output.   Printing the LRTable object will produce a listing
@@ -1976,9 +1952,8 @@ class LRTable(object):
 
             for state, tok, resolution, shift_node, reduce_node in self.sr_conflicts:
                 out.append(f'shift/reduce conflict for {tok} in state {state} resolved as {resolution}')
-                #self._log_shiftreduce_counterexamples(shift_node, reduce_node, tok, out)
                 dom_nodes = { shift_node.item_set: ([LRPath(shift_node, None)], [LRPath(reduce_node, None)]) }
-                self._log_shiftreduce_counterexamples(dom_nodes, tok, out)
+                self._log_counterexamples(dom_nodes, 'shift path', 'reduce path', tok, out)
 
 
             already_reported = set()
@@ -1988,9 +1963,8 @@ class LRTable(object):
                 out.append(f'reduce/reduce conflict in state {state} resolved using rule {rule}')
                 out.append(f'rejected rule ({rejected}) in state {state}')
                 already_reported.add((state, id(rule), id(rejected)))
-                dom_nodes = { node.item_set: { node: LRPath(node, []),
-                                               rejected_node: LRPath(rejected_node, None) } }
-                #self._log_reducereduce_counterexamples(dom_nodes, out, set([]))
+                dom_nodes = { node.item_set: ([LRPath(node, [])], [LRPath(rejected_node, None)]) }
+                self._log_counterexamples(dom_nodes, f'reduce using {rule}', f'reduce using {rejected}', None, out)
 
             warned_never = set()
             for state, rule, rejected, node, rejected_node in self.rr_conflicts:
