@@ -526,21 +526,25 @@ class LRDominanceNode(object):
                     return path.derive_from(predecessor, la)
         return None
 
-    def backtrack_shift(self, backtrack_nodes, path, state_count, seen, add=True):
-        if self in seen:
-            return
-        seen.add(self)
-
-        if add:
-            try:
-                backtrack_nodes[0][self.item_set][1].append(path)
-            except KeyError:
-                pass
-        for pred, la in self.direct_predecessors.items():
-            if pred.item_set == self.item_set:
-                pred.backtrack_shift(backtrack_nodes, path.derive_from(pred, la), state_count, seen, False)
-            elif state_count > 0:
-                pred.backtrack_shift(backtrack_nodes[1:], path.derive_from(pred, la), state_count-1, set([]), True)
+    def backtrack(self, path, depth, force_path):
+        seen = set([self])
+        queue = [(path, depth, force_path)]
+        result = []
+        while queue:
+            path, depth, force_path = queue.pop(0)
+            node = path._node
+            for pred, la in node.direct_predecessors.items():
+                if pred in seen:
+                    continue
+                seen.add(pred)
+                if pred.item_set == self.item_set:
+                    if len(force_path) == 0 or pred in force_path:
+                        queue.append((path.derive_from(pred, None), depth, force_path))
+                elif depth == 1:
+                    result.append(path.derive_from(pred, la))
+                else:
+                    queue.append((path.derive_from(pred, la), depth - 1, []))
+        return result
 
     def find_split(self, path, common_predecessors, outside_predecessors):
         queue = [(self, path)]
@@ -1882,7 +1886,7 @@ class LRTable(object):
         conflict_r1_paths = []
         conflict_r2_paths = []
         while node_map:
-            group, (r1_paths, r2_paths) = node_map.popitem()
+            (group, depth), (r1_paths, r2_paths) = node_map.popitem()
             if group in seen:
                 continue
             if len(r1_paths) == 0:
@@ -1903,17 +1907,19 @@ class LRTable(object):
                 conflict_r1_paths_tmp = r1_path._node.find_split(r1_path, common_predecessors, new_r1_items)
             for r2_path in r2_paths:
                 conflict_r2_paths_tmp = r2_path._node.find_split(r2_path, common_predecessors, new_r2_items)
-            if lookahead:
-                rewind = 0
-                # make sure to go back to the origin of the reduce option (r2)
-                for p in conflict_r2_paths_tmp:
-                    rewind = max(rewind, p._node.item.lr_index)
-                # go back X states up. Shift paths will always take the shortest items to follow reduce paths.
-                # TODO
+            
+            # make sure to go back to the origin of the reduce options (backtrack_depth)
+            # always take shortest paths to a previous state (i.e. don't expand recursively for no reason)
+            # only go through predecessors (skip paths outside of common path).
+            if depth > 0:
+                conflict_r1_paths_tmp = sum([r1_path._node.backtrack(r1_path, depth, common_predecessors) for r1_path in conflict_r1_paths_tmp], [])
+                conflict_r2_paths_tmp = sum([r2_path._node.backtrack(r2_path, depth, common_predecessors) for r2_path in conflict_r2_paths_tmp], [])
 
+            if lookahead:
                 # now that reduce paths are in the correct state, look for the rules that follow with the lookahead.
                 # Same rules apply, shift paths will take the shortest items to follow reduce paths.
                 # TODO
+                pass
             conflict_r1_paths += conflict_r1_paths_tmp
             conflict_r2_paths += conflict_r2_paths_tmp
 
@@ -1928,9 +1934,9 @@ class LRTable(object):
                     continue
                 else:
                     try:
-                        s_p, r_p = node_map[state]
+                        s_p, r_p = node_map[(state, depth - 1)]
                     except KeyError:
-                        node_map[state] = (r1_paths, r2_paths)
+                        node_map[(state, depth - 1)] = (r1_paths, r2_paths)
                     else:
                         s_p.extend(r1_paths)
                         r_p.extend(r2_paths)
@@ -1952,7 +1958,7 @@ class LRTable(object):
 
             for state, tok, resolution, shift_node, reduce_node in self.sr_conflicts:
                 out.append(f'shift/reduce conflict for {tok} in state {state} resolved as {resolution}')
-                dom_nodes = { shift_node.item_set: ([LRPath(shift_node, None)], [LRPath(reduce_node, None)]) }
+                dom_nodes = { (shift_node.item_set, reduce_node.item.lr_index): ([LRPath(shift_node, None)], [LRPath(reduce_node, None)]) }
                 self._log_counterexamples(dom_nodes, 'shift path', 'reduce path', tok, out)
 
 
@@ -1962,8 +1968,9 @@ class LRTable(object):
                     continue
                 out.append(f'reduce/reduce conflict in state {state} resolved using rule {rule}')
                 out.append(f'rejected rule ({rejected}) in state {state}')
+                backtrack_size = max(len(rule), len(rejected))
                 already_reported.add((state, id(rule), id(rejected)))
-                dom_nodes = { node.item_set: ([LRPath(node, [])], [LRPath(rejected_node, None)]) }
+                dom_nodes = { (node.item_set, backtrack_size): ([LRPath(node, [])], [LRPath(rejected_node, None)]) }
                 self._log_counterexamples(dom_nodes, f'reduce using {rule}', f'reduce using {rejected}', None, out)
 
             warned_never = set()
