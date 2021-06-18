@@ -365,9 +365,10 @@ class LRPath(object):
         
     def derive_from(self, node, lookahead):
         if lookahead is None:
-            return LRPath(node, [self] + [LRPath.LRPathItem(i) for i in node.item.prod[node.item.lr_index+2:]])
+            result = LRPath(node, [self] + [LRPath.LRPathItem(i) for i in node.item.prod[node.item.lr_index+2:]])
         else:
-            return LRPath(node, [LRPath.LRPathItem(lookahead)] + self._sequence)
+            result = LRPath(node, [LRPath.LRPathItem(lookahead)] + self._sequence)
+        return result
 
     def expand_left(self):
         return LRPath(self._node, [LRPath.LRPathItem(i) for i in self._node.item.prod[:self._node.item.lr_index]] + self._sequence)
@@ -509,8 +510,11 @@ class LRDominanceNode(object):
                             shift_path._node.backtrack_node(shift_path, lookahead, predecessor.item_set)
         return result
 
-    def backtrack_node(self, path, lookahead, state):
-        # this method will find the predecessors coming from the specified state, following the specified lookahead
+    def backtrack_node(self, path, parent):
+        # this method will find the fastest path from self to the specified parent
+        if parent == self:
+            return path
+        assert parent in self.predecessors
         queue = [(self, path)]
         seen = set([])
 
@@ -521,29 +525,31 @@ class LRDominanceNode(object):
             seen.add(node)
             for predecessor, la in node.direct_predecessors.items():
                 if la is None:
-                    queue.append((predecessor, path.derive_from(predecessor, None)))
-                elif la == lookahead and predecessor.item_set == state:
-                    return path.derive_from(predecessor, la)
+                    if predecessor == parent:
+                        return path.derive_from(predecessor, None)
+                    else:
+                        queue.append((predecessor, path.derive_from(predecessor, None)))
         return None
 
-    def backtrack(self, path, depth, force_path):
-        seen = set([self])
-        queue = [(path, depth, force_path)]
+    def backtrack_up(self, paths_set_1, paths_set_2, depth):
+        # this method will find the fastest path from self to the specified parent
+        queue = [(self, paths_set_1, paths_set_2, depth)]
+        seen = set([])
         result = []
         while queue:
-            path, depth, force_path = queue.pop(0)
-            node = path._node
-            for pred, la in node.direct_predecessors.items():
-                if pred in seen:
-                    continue
-                seen.add(pred)
-                if pred.item_set == self.item_set:
-                    if len(force_path) == 0 or pred in force_path:
-                        queue.append((path.derive_from(pred, None), depth, force_path))
-                elif depth == 1:
-                    result.append(path.derive_from(pred, la))
-                else:
-                    queue.append((path.derive_from(pred, la), depth - 1, []))
+            node, paths_set_1, paths_set_2, depth = queue.pop(0)
+            if (node, depth) in seen:
+                continue
+            seen.add((node, depth))
+
+            if depth == 0:
+                result.append((paths_set_1, paths_set_2))
+            else:
+                for pred, la in node.direct_predecessors.items():
+                    if la is None:
+                        queue.append((pred, [path.derive_from(pred, None) for path in paths_set_1], [path.derive_from(pred, None) for path in paths_set_2], depth))
+                    else:
+                        queue.append((pred, [path.derive_from(pred, la) for path in paths_set_1], [path.derive_from(pred, la) for path in paths_set_2], depth - 1))
         return result
 
     def find_split(self, path, common_predecessors, outside_predecessors):
@@ -560,7 +566,7 @@ class LRDominanceNode(object):
                 result.append(path)
             
             for pred, lookahead in node.direct_predecessors.items():
-                if pred.item_set == self.item_set:
+                if lookahead is None:
                     if pred in common_predecessors:
                         # this node is the direct successor of a split; stop recursion here
                         result.append(path)
@@ -608,9 +614,9 @@ class LRItemSet(object):
                 target_node = LRDominanceNode(self, item, {node: lookahead})
                 self._items[item] = target_node
             else:
-                self._core.add(target_node)
                 target_node.direct_predecessors[node] = lookahead
                 node.direct_successors[target_node] = lookahead
+            self._core.add(target_node)
 
     def _lr0_close(self):
         # Compute the LR(0) closure operation on self._items
@@ -1907,25 +1913,30 @@ class LRTable(object):
                 conflict_r1_paths_tmp = r1_path._node.find_split(r1_path, common_predecessors, new_r1_items)
             for r2_path in r2_paths:
                 conflict_r2_paths_tmp = r2_path._node.find_split(r2_path, common_predecessors, new_r2_items)
-            
+
             # make sure to go back to the origin of the reduce options (backtrack_depth)
-            # always take shortest paths to a previous state (i.e. don't expand recursively for no reason)
-            # only go through predecessors (skip paths outside of common path).
-            if depth > 0:
-                conflict_r1_paths_tmp = sum([r1_path._node.backtrack(r1_path, depth, common_predecessors) for r1_path in conflict_r1_paths_tmp], [])
-                conflict_r2_paths_tmp = sum([r2_path._node.backtrack(r2_path, depth, common_predecessors) for r2_path in conflict_r2_paths_tmp], [])
+            up_paths = []
+            if len(conflict_r1_paths_tmp) > 0:
+                assert len(conflict_r2_paths_tmp) > 0
+                if depth > 0:
+                    core_common_predecessors = common_predecessors.intersection(group._core)
+                    assert len(core_common_predecessors) > 0
+                    for core_node in core_common_predecessors:
+                        up_paths += core_node.backtrack_up([p._node.backtrack_node(p, core_node) for p in conflict_r1_paths_tmp],
+                                                           [p._node.backtrack_node(p, core_node) for p in conflict_r2_paths_tmp],
+                                                           depth)
+                else:
+                    up_paths = [(conflict_r1_paths_tmp, conflict_r2_paths_tmp)]
 
-            if lookahead:
-                # now that reduce paths are in the correct state, look for the rules that follow with the lookahead.
-                # Same rules apply, shift paths will take the shortest items to follow reduce paths.
-                # TODO
-                pass
-            conflict_r1_paths += conflict_r1_paths_tmp
-            conflict_r2_paths += conflict_r2_paths_tmp
-
-            #conflict_shift_paths, conflict_reduce_paths = self._search_reduce_counterexamples(conflict_shift_paths,
-            #                                                                                  conflict_reduce_paths,
-            #                                                                                  lookahead)
+            for conflict_r1_paths_tmp, conflict_r2_paths_tmp in up_paths:
+                if lookahead:
+                    # now that all paths are in the correct state, look for the rules that follow with the lookahead.
+                    # Same rules apply, shift paths will take the shortest items to follow reduce paths.
+                    # TODO
+                    pass
+                conflict_r1_paths += conflict_r1_paths_tmp
+                conflict_r2_paths += conflict_r2_paths_tmp
+                r2 = conflict_r2_paths_tmp[0]
 
             for state, r1_paths in new_r1_items.items():
                 try:
@@ -1942,7 +1953,6 @@ class LRTable(object):
                         r_p.extend(r2_paths)
         self._log(example_1, conflict_r1_paths, out)
         self._log(example_2, conflict_r2_paths, out)
-        
 
     # ----------------------------------------------------------------------
     # Debugging output.   Printing the LRTable object will produce a listing

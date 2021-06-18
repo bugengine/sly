@@ -5,9 +5,8 @@ import sly
 
 class QualNameLexer(sly.Lexer):
     tokens = [
-        "identifier",
+        "identifier", '::', ',', 'template'
     ]
-    literals = { '::', ',' }
 
 class QualNameParser(sly.Parser):
     tokens = QualNameLexer.tokens
@@ -29,22 +28,22 @@ class QualNameParser(sly.Parser):
     def unqualified_id(self, p):
         pass
 
-    @_("'template'")
+    @_("template")
     @_("")
     def template_opt(self, p):
         pass
 
     @_("nested_name_specifier unqualified_id")
-    @_("'::' nested_name_specifier unqualified_id")
+    @_(":: nested_name_specifier unqualified_id")
     def qualified_id(self, p):
         pass
 
-    @_("','")
+    @_(",")
     @_("")
     def comma_opt(self, p):
         pass
 
-    @_("template_opt identifier '::'")
+    @_("template_opt identifier ::")
     def nested_name_specifier(self, p):
         pass
 
