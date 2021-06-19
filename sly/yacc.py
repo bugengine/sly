@@ -413,102 +413,55 @@ class LRDominanceNode(object):
         for p in predecessors.items():
             p[0].direct_successors[self] = p[1]
 
-    def find_lookahead(self, path, lookahead, seen):
-        # this method will go into the shift tree to find a sequence that starts with "lookahead".
-        if len(self.item.prod) == self.item.lr_index + 1:
-            return [(path, True)]
-        # TODO: this method should expand items in the path to make the path easier to understand.
-        result = []
-        for successor, la in self.direct_successors.items():
-            if la == lookahead:
-                # found, return
-                result.append((path, False))
-            elif la == None:
-                # node can be expanded, so check expansions
-                if (self, successor) in seen:
-                    continue
-                seen.add((self, successor))
-                intermediate_result = successor.find_lookahead(path, lookahead, seen)
-                for p, can_expand in intermediate_result:
-                    if can_expand:
-                        for successor, la in self.direct_successors.items():
-                            if la == self.item.prod[self.item.lr_index + 1]:
-                                result += successor.find_lookahead(path, lookahead, seen)
-                    else:
-                        # todo: path manipulation
-                        result.append((p, False))
-        return result
-
-
-    def backtrack_reduce(self, reduce_path, shift_path, shift_lookahead):
-        # this method will go up the reduce stack and look for items that follow by shifting lookahead
-        result = []
-        queue = [(self, reduce_path, shift_path, None, self._node.item.name. shift_lookahead)]
-        priorities = [(0, 0)]
-        reduce_seen = set([])
-        shift_seen = set([])
+    def scan_lookahead(self, paths, lookahead):
+        # this method will explore the node's expansions to find lookahead, and if found, return the paths corresponding to the expansion
         while queue:
-            node, path, shift_path, reduce_size, origin, reduce_lookahead = queue.pop(0)
-            depth, subdepth = priorities.pop(0)
-
-            # subdepth != 0 => allow reentering the same node for a reduce, but not for multiple reduce
-            if (node, subdepth != 0) in reduce_seen:
+            node, paths = queue.pop(0)
+            if node in seen:
                 continue
-            reduce_seen.add((node, subdepth != 0))
-            if depth == reduce_size:
-                if subdepth > 0:
-                    assert len(node.item.prod) > node.item.lr_index+1
-                    assert node.item.prod[node.item.lr_index+1] == reduce_lookahead
-                    # this is the reduce node. Check the shifts
-                    for successor in node.direct_successors:
-                        if successor.item_set != node.item_set:
-                            assert successor.direct_predecessors[node] == reduce_lookahead
-                            # this is the node after the shift. Look for the lookahead
-                            if (node, successor) in shift_seen:
-                                # we have already tried to expand this, a new try will not ucover more lookaheads.
-                                continue
-                            shift_seen.add((node, successor))
-                            found = False
-
-                            for result_path, can_reduce in successor.find_lookahead(path, shift_lookahead, set([])):
-                                if can_reduce:
-                                    # after shifting the reduce_lookahead, a new reduction can happen.
-                                    # the reduce will climb up again, going through node
-                                    # node is already one level higher than this successor
-                                    # item set is "reentered" from this edge
-                                    new_reduce_size = depth + len(successor.item.prod) - 2
-                                    index = bisect.bisect_right(priorities, (depth, 0))
-                                    queue.insert(index, (node, path, shift_path, new_reduce_size, successor, successor.item.name))
-                                    priorities.insert(index, (depth, 0))
-                                elif not found:
-                                    found = True
-                                    while len(result) < depth+1:
-                                        result.append({})
-                                    try:
-                                        result[depth][node.item_set].append((result_path, shift_path))
-                                    except KeyError:
-                                        result[depth][node.item_set] = [(result_path, shift_path)]
-                else:
-                    for predecessor, lookahead in node.direct_predecessors.items():
-                        if lookahead is None:
-                            index = bisect.bisect_right(priorities, (depth, subdepth + 1))
-                            queue.insert(index, (predecessor, path.derive_from(predecessor, None), shift_path, reduce_size, origin, reduce_lookahead))
-                            priorities.insert(index, (depth, subdepth + 1))
+            seen.add(node)
+            assert node.item.lr_index == 0
+            if len(node.item.prod) == 1:
+                # can be empty
+                return [(paths, True)]
+            elif node.item.prod[1] == lookahead:
+                return [(paths, False)]
             else:
-                for predecessor, lookahead in node.direct_predecessors.items():
-                    if lookahead is None:
-                        index = bisect.bisect_right(priorities, (depth, subdepth + 1))
-                        queue.insert(index, (predecessor, path.derive_from(predecessor, None), shift_path, reduce_size, origin, reduce_lookahead))
-                        priorities.insert(index, (depth, subdepth + 1))
-                    else:
-                        new_shift_path = shift_path._node.backtrack_node(shift_path, lookahead, predecessor.item_set)
-                        if new_shift_path is not None:
-                            index = bisect.bisect_right(priorities, (depth + 1, 0))
-                            queue.insert(index, (predecessor, path.derive_from(predecessor, lookahead), new_shift_path, reduce_size, origin, reduce_lookahead))
-                            priorities.insert(index, (depth + 1, 0))
-                        else:
-                            shift_path._node.backtrack_node(shift_path, lookahead, predecessor.item_set)
-        return result
+                # expand further
+                pass
+
+        if self.item.lr_index == len(self.item.prod) - 1:
+            return [(paths_set_1, paths_set_2, True)]
+        else:
+            follower = self.item.prod[self.item.lr_index + 1]
+            if follower == lookahead:
+                return [(paths_set_1, paths_set_2, False)]
+            else:
+                result = []
+                for successor, la in self.direct_successors.items():
+                    if la == follower:
+                        result += successor.forward_scan_lookahead(self, paths_set_1, paths_set_2)
+
+            return result
+
+    def forward_scan_lookahead(self, paths, lookahead, first):
+        # this method will explore the node's items to find lookahead, and if found, return the paths corresponding to the expansion
+        # TODO: actual expansions
+        node = self
+        result = []
+        while node.item.lr_index < len(node.item.prod) - 1:
+            next_symbol = node.item.prod[node.item.lr_index + 1]
+            symbol_first = first[next_symbol]
+            if lookahead in symbol_first:
+                result.append((paths, False))
+            if '<empty>' in symbol_first:
+                for node, la in node.direct_successors.items():
+                    if la == next_symbol:
+                        break
+            else:
+                return result
+
+        return result + [(paths, True)]
 
     def backtrack_node(self, path, parent):
         # this method will find the fastest path from self to the specified parent
@@ -1893,13 +1846,13 @@ class LRTable(object):
         conflict_r2_paths = []
         while node_map:
             (group, depth), (r1_paths, r2_paths) = node_map.popitem()
-            if group in seen:
+            if (group, depth) in seen:
                 continue
             if len(r1_paths) == 0:
                 continue
             if len(r2_paths) == 0:
                 continue
-            seen.add(group)
+            seen.add((group, depth))
             common_predecessors = set(r1_paths[0]._node.predecessors)
             common_predecessors.add(r1_paths[0]._node)
             for p in r1_paths[1:]:
@@ -1925,18 +1878,56 @@ class LRTable(object):
                         up_paths += core_node.backtrack_up([p._node.backtrack_node(p, core_node) for p in conflict_r1_paths_tmp],
                                                            [p._node.backtrack_node(p, core_node) for p in conflict_r2_paths_tmp],
                                                            depth)
+                #elif lookahead is not None:
+                #    # join all paths at a common predecessor
+                #    direct_predecessors = set(conflict_r2_paths_tmp[0]._node.direct_predecessors)
+                #    for p in conflict_r2_paths_tmp:
+                #        direct_predecessors.update(p._node.direct_predecessors)
+                #    direct_predecessors.intersection_update(common_predecessors)
+                #    assert len(direct_predecessors) > 0
+                #    for core_node in direct_predecessors:
+                #        up_paths.append((conflict_r1_paths_tmp, [p._node.backtrack_node(p, core_node) for p in conflict_r2_paths_tmp]))
                 else:
                     up_paths = [(conflict_r1_paths_tmp, conflict_r2_paths_tmp)]
 
             for conflict_r1_paths_tmp, conflict_r2_paths_tmp in up_paths:
                 if lookahead:
-                    # now that all paths are in the correct state, look for the rules that follow with the lookahead.
-                    # Same rules apply, shift paths will take the shortest items to follow reduce paths.
-                    # TODO
-                    pass
-                conflict_r1_paths += conflict_r1_paths_tmp
-                conflict_r2_paths += conflict_r2_paths_tmp
-                r2 = conflict_r2_paths_tmp[0]
+                    # For each set of paths in up_paths, the paths in the second list (the reduce paths) always start
+                    # from the same node.
+                    # Starting from this node, look for the rules that follow with the specified lookahead.
+                    # When a suitable node has been found, walk back to that node.
+                    seen = set([])
+                    queue = []
+                    for predecessor, la in conflict_r2_paths_tmp[0]._node.direct_predecessors.items():
+                        if la is None:
+                            queue.append((predecessor, conflict_r1_paths_tmp, [p.derive_from(predecessor, None) for p in conflict_r2_paths_tmp]))
+                    while queue:
+                        predecessor, conflict_r1_paths_tmp, conflict_r2_paths_tmp = queue.pop(0)
+                        if predecessor in seen:
+                            continue
+                        seen.add(predecessor)
+                        follow = predecessor.item.prod[predecessor.item.lr_index + 1]
+                        for node, la in predecessor.direct_successors.items():
+                            if la == follow:
+                                break
+                        for paths, can_expand in node.forward_scan_lookahead(conflict_r2_paths_tmp, lookahead, self.grammar.First):
+                            found = False
+                            if can_expand:
+                                # need to rewind
+                                up_count = predecessor.item.lr_index
+                                if up_count == 0:
+                                    for node, la in predecessor.direct_predecessors.items():
+                                        if la is None:
+                                            queue.append((node, conflict_r1_paths_tmp, [p.derive_from(node, None) for p in paths]))
+                            else:
+                                conflict_r2_paths += paths
+                                found = True
+                            if found:
+                                # if some reduce paths have been found, add shift paths
+                                conflict_r1_paths += conflict_r1_paths_tmp
+                else:
+                    conflict_r1_paths += conflict_r1_paths_tmp
+                    conflict_r2_paths += conflict_r2_paths_tmp
 
             for state, r1_paths in new_r1_items.items():
                 try:
