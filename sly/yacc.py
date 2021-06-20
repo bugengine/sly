@@ -403,17 +403,27 @@ class LRPath(object):
 # -----------------------------------------------------------------------------
 
 class LRDominanceNode(object):
-    def __init__(self, item_set, item, predecessors):
+    def __init__(self, item_set, item, predecessor=None, parent=None):
         self.item_set = item_set
         self.item = item
-        self.direct_predecessors = predecessors
-        self.predecessors = set([])
-        self.direct_successors = {}
-        self.successors = set([])
-        for p in predecessors.items():
-            p[0].direct_successors[self] = p[1]
+        if predecessor is not None:
+            self.predecessor_lookahead = predecessor[0]
+            self.predecessors = [predecessor[1]]
+        else:
+            self.predecessors = []
+        self.successor = None
 
-    def direct_parent(self, path):
+        self.direct_parents = []
+        self.parents = set([])
+        self.direct_children = []
+        self.children = set([])
+        if parent is not None:
+            self.direct_parents.append(parent)
+            self.parents.add(parent)
+            parent.direct_children.append(self)
+            parent.children.add(self)
+
+    def backtrace_direct_parent(self, path):
         # this method expands path one level up using the item that has the shortest possible expansion
         # that has the same leading symbols as this node
         # avoid expansion of a recursive item
@@ -422,12 +432,11 @@ class LRDominanceNode(object):
         prefix = self.item.prod[:self.item.lr_index]
         candidates_1 = []
         candidates_2 = []
-        for predecessor, la in path._node.direct_predecessors.items():
-            if la is None:
-                if predecessor.item.name == self.item.name:
-                    if predecessor.item.prod[:predecessor.item.lr_index] == prefix:
-                        candidates_1.append(predecessor)
-                    candidates_2.append(predecessor)
+        for parent in path._node.direct_parents:
+            if parent.item.name == self.item.name:
+                if parent.item.prod[:parent.item.lr_index] == prefix:
+                    candidates_1.append(parent)
+                candidates_2.append(parent)
         if candidates_1:
             return path.derive_from(sorted(candidates_1, key=lambda n: len(n.item.prod))[0], None)
         if candidates_2:
@@ -446,19 +455,17 @@ class LRDominanceNode(object):
             if lookahead in symbol_first:
                 result.append((paths, False))
             if '<empty>' in symbol_first:
-                for node, la in node.direct_successors.items():
-                    if la == next_symbol:
-                        break
+                node = node.successor
             else:
                 return result
 
         return result + [(paths, True)]
 
-    def backtrack_node(self, path, parent):
+    def backtrack_node(self, path, target_parent):
         # this method will find the fastest path from self to the specified parent
-        if parent == self:
+        if target_parent == self:
             return path
-        assert parent in self.predecessors
+        assert target_parent in self.parents
         queue = [(self, path)]
         seen = set([])
 
@@ -467,12 +474,11 @@ class LRDominanceNode(object):
             if node in seen:
                 continue
             seen.add(node)
-            for predecessor, la in node.direct_predecessors.items():
-                if la is None:
-                    if predecessor == parent:
-                        return path.derive_from(predecessor, None)
-                    else:
-                        queue.append((predecessor, path.derive_from(predecessor, None)))
+            for parent in node.direct_parents:
+                if parent == target_parent:
+                    return path.derive_from(parent, None)
+                else:
+                    queue.append((parent, path.derive_from(parent, None)))
         return None
 
     def backtrack_up(self, paths_set_1, paths_set_2, depth):
@@ -489,14 +495,19 @@ class LRDominanceNode(object):
             if depth == 0:
                 result.append((paths_set_1, paths_set_2))
             else:
-                for pred, la in node.direct_predecessors.items():
-                    if la is None:
-                        queue.append((pred, [path.derive_from(pred, None) for path in paths_set_1], [path.derive_from(pred, None) for path in paths_set_2], depth))
-                    else:
-                        queue.append((pred, [path.derive_from(pred, la) for path in paths_set_1], [path.derive_from(pred, la) for path in paths_set_2], depth - 1))
+                for parent in node.direct_parents:
+                    queue.append((parent,
+                                  [path.derive_from(parent, None) for path in paths_set_1],
+                                  [path.derive_from(parent, None) for path in paths_set_2],
+                                  depth))
+                for predecessor in node.predecessors:
+                    queue.append((predecessor,
+                                  [path.derive_from(predecessor, self.predecessor_lookahead) for path in paths_set_1],
+                                  [path.derive_from(predecessor, self.predecessor_lookahead) for path in paths_set_2],
+                                  depth - 1))
         return result
 
-    def find_split(self, path, common_predecessors, outside_predecessors):
+    def find_split(self, path, common_parents, outside_predecessors):
         queue = [(self, path)]
         seen = set([])
         result = []
@@ -506,22 +517,21 @@ class LRDominanceNode(object):
             if node in seen:
                 continue
             seen.add(node)
-            if node in common_predecessors:
+            if node in common_parents:
                 result.append(path)
             
-            for pred, lookahead in node.direct_predecessors.items():
-                if lookahead is None:
-                    if pred in common_predecessors:
-                        # this node is the direct successor of a split; stop recursion here
-                        result.append(path)
-                    else:
-                        queue.append((pred, path.derive_from(pred, None)))
+            for parent in node.direct_parents:
+                if parent in common_parents:
+                    # this node is the direct successor of a split; stop recursion here
+                    result.append(path)
                 else:
-                    # register predecessors from other state for the caller to recurse into
-                    try:
-                        outside_predecessors[pred.item_set].append(path.derive_from(pred, lookahead))
-                    except KeyError:
-                        outside_predecessors[pred.item_set] = [path.derive_from(pred, lookahead)]
+                    queue.append((parent, path.derive_from(parent, None)))
+            for predecessor in node.predecessors:
+                # register predecessors from other state for the caller to recurse into
+                try:
+                    outside_predecessors[predecessor.item_set].append(path.derive_from(predecessor, node.predecessor_lookahead))
+                except KeyError:
+                    outside_predecessors[predecessor.item_set] = [path.derive_from(predecessor, node.predecessor_lookahead)]
         return result
 
 # -----------------------------------------------------------------------------
@@ -555,11 +565,12 @@ class LRItemSet(object):
             try:
                 target_node = self._items[item]
             except KeyError:
-                target_node = LRDominanceNode(self, item, {node: lookahead})
+                target_node = LRDominanceNode(self, item, predecessor = (lookahead, node))
                 self._items[item] = target_node
             else:
-                target_node.direct_predecessors[node] = lookahead
-                node.direct_successors[target_node] = lookahead
+                assert node not in target_node.predecessors
+                target_node.predecessors.append(node)
+            node.successor = target_node
             self._core.add(target_node)
 
     def _lr0_close(self):
@@ -577,23 +588,25 @@ class LRItemSet(object):
                             successor = new_items[x.lr_next]
                         except KeyError:
                             successor = LRDominanceNode(
-                                self, x.lr_next, {dn: None}
+                                self, x.lr_next, parent=dn
                             )
                             new_items[x.lr_next] = successor
-                    dn.direct_successors[successor] = None
-                    successor.direct_predecessors[dn] = None
-                    if successor not in dn.successors:
-                        dn.successors.add(successor)
-                        dn.successors.update(successor.successors)
-                        for node in dn.predecessors:
-                            node.successors.add(successor)
-                            node.successors.update(successor.successors)
+                    if successor not in dn.direct_children:
+                        dn.direct_children.append(successor)
+                    if dn not in successor.direct_parents:
+                        successor.direct_parents.append(dn)
 
-                        successor.predecessors.add(dn)
-                        successor.predecessors.update(dn.predecessors)
-                        for node in successor.successors:
-                            node.predecessors.add(dn)
-                            node.predecessors.update(dn.predecessors)
+                    dn.children.add(successor)
+                    dn.children.update(successor.children)
+                    for node in dn.parents:
+                        node.children.add(successor)
+                        node.children.update(successor.children)
+
+                    successor.parents.add(dn)
+                    successor.parents.update(dn.parents)
+                    for node in successor.children:
+                        node.parents.add(dn)
+                        node.parents.update(dn.parents)
 
 # -----------------------------------------------------------------------------
 # rightmost_terminal()
@@ -1284,7 +1297,7 @@ class LRTable(object):
 
     # Compute the LR(0) sets of item function
     def lr0_items(self):
-        root_node = LRDominanceNode(None, self.grammar.Productions[0].lr_next, {})
+        root_node = LRDominanceNode(None, self.grammar.Productions[0].lr_next)
         C = [LRItemSet([(self.grammar.Productions[0].lr_next, root_node, '$start')])]
         i = 0
         for I in C:
@@ -1806,11 +1819,10 @@ class LRTable(object):
                     '  }'
                 ]))
             for node in I._items.values():
-                for predecessor, lookahead in node.direct_predecessors.items():
-                    if lookahead is None:
-                        self.edge_description += [f'    {id(predecessor)}->{id(node)}[style=dotted];']
-                    else:
-                        self.edge_description += [f'    {id(predecessor)}->{id(node)}[label="{lookahead}"];']
+                for parent in node.direct_parents:
+                    self.edge_description += [f'    {id(parent)}->{id(node)}[style=dotted];']
+                for predecessor in node.predecessors:
+                    self.edge_description += [f'    {id(predecessor)}->{id(node)}[label="{node.predecessor_lookahead}"];']
 
     def _log(self, title, conflict_paths, out):
         if conflict_paths:
@@ -1841,22 +1853,22 @@ class LRTable(object):
                 continue
             group_seen.add((group, depth))
 
-            # find common predecessors in this item group
+            # find common parents in this item group
             # there could be none, in this case find_split will recurse into other groups
             # until there is a group containing common predecessors
-            common_predecessors = set(r1_paths[0]._node.predecessors)
-            common_predecessors.add(r1_paths[0]._node)
+            common_parents = set(r1_paths[0]._node.parents)
+            common_parents.add(r1_paths[0]._node)
             for p in r1_paths[1:]:
-                common_predecessors.intersection_update(p._node.predecessors.union([p._node]))
+                common_parents.intersection_update(p._node.parents.union([p._node]))
             for p in r2_paths:
-                common_predecessors.intersection_update(p._node.predecessors.union([p._node]))
+                common_parents.intersection_update(p._node.parents.union([p._node]))
             
             new_r1_items = {}
             new_r2_items = {}
             for r1_path in r1_paths:
-                conflict_r1_paths_tmp = r1_path._node.find_split(r1_path, common_predecessors, new_r1_items)
+                conflict_r1_paths_tmp = r1_path._node.find_split(r1_path, common_parents, new_r1_items)
             for r2_path in r2_paths:
-                conflict_r2_paths_tmp = r2_path._node.find_split(r2_path, common_predecessors, new_r2_items)
+                conflict_r2_paths_tmp = r2_path._node.find_split(r2_path, common_parents, new_r2_items)
 
             # fill node_map with paths discovered when looking for the split
             for state, r1_paths in new_r1_items.items():
@@ -1879,48 +1891,45 @@ class LRTable(object):
             if len(conflict_r1_paths_tmp) > 0:
                 assert len(conflict_r2_paths_tmp) > 0
                 if depth > 0:
-                    core_common_predecessors = common_predecessors.intersection(group._core)
-                    assert len(core_common_predecessors) > 0
-                    for core_node in core_common_predecessors:
+                    core_common_parents = common_parents.intersection(group._core)
+                    assert len(core_common_parents) > 0
+                    for core_node in core_common_parents:
                         up_paths += core_node.backtrack_up([p._node.backtrack_node(p, core_node) for p in conflict_r1_paths_tmp],
                                                            [p._node.backtrack_node(p, core_node) for p in conflict_r2_paths_tmp],
                                                            depth)
                 else:
                     up_paths = [(conflict_r1_paths_tmp, conflict_r2_paths_tmp)]
 
+            seen = set([])
             for conflict_r1_paths_tmp, conflict_r2_paths_tmp in up_paths:
                 if lookahead:
                     # Process the second list (reduce list) to find a production following with lookahead.
                     # For each set of paths in up_paths, the paths always have a common parent
                     # Starting from this common node, look for the rules that follow with the specified lookahead.
                     # When a suitable node has been found, walk back to that node.
-                    seen = set([])
                     queue = []
-                    for predecessor, la in conflict_r2_paths_tmp[0]._node.direct_predecessors.items():
-                        if la is None:
-                            queue.append((predecessor,
-                                          [predecessor.direct_parent(p) for p in conflict_r1_paths_tmp],
-                                          [p.derive_from(predecessor, None) for p in conflict_r2_paths_tmp]))
+                    for parent in conflict_r2_paths_tmp[0]._node.direct_parents:
+                        queue.append((parent,
+                                     [parent.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
+                                     [p.derive_from(parent, None) for p in conflict_r2_paths_tmp]))
                     while queue:
                         predecessor, conflict_r1_paths_tmp, conflict_r2_paths_tmp = queue.pop(0)
                         if predecessor in seen:
                             continue
                         seen.add(predecessor)
-                        follow = predecessor.item.prod[predecessor.item.lr_index + 1]
-                        for node, la in predecessor.direct_successors.items():
-                            if la == follow:
-                                break
+                        node = predecessor.successor
                         for paths, can_expand in node.forward_scan_lookahead(conflict_r2_paths_tmp, lookahead, self.grammar.First):
                             found = False
                             if can_expand:
                                 # need to rewind
                                 up_count = predecessor.item.lr_index
                                 if up_count == 0:
-                                    for node, la in predecessor.direct_predecessors.items():
-                                        if la is None:
-                                            queue.append((node,
-                                                            [node.direct_parent(p) for p in conflict_r1_paths_tmp],
-                                                            [p.derive_from(node, None) for p in paths]))
+                                    for node in predecessor.direct_parents:
+                                        queue.append((node,
+                                                     [node.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
+                                                     [p.derive_from(node, None) for p in paths]))
+                                #else:
+                                #    assert False, "TODO"
                             else:
                                 conflict_r2_paths += paths
                                 found = True
