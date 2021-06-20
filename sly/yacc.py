@@ -413,36 +413,27 @@ class LRDominanceNode(object):
         for p in predecessors.items():
             p[0].direct_successors[self] = p[1]
 
-    def scan_lookahead(self, paths, lookahead):
-        # this method will explore the node's expansions to find lookahead, and if found, return the paths corresponding to the expansion
-        while queue:
-            node, paths = queue.pop(0)
-            if node in seen:
-                continue
-            seen.add(node)
-            assert node.item.lr_index == 0
-            if len(node.item.prod) == 1:
-                # can be empty
-                return [(paths, True)]
-            elif node.item.prod[1] == lookahead:
-                return [(paths, False)]
-            else:
-                # expand further
-                pass
-
-        if self.item.lr_index == len(self.item.prod) - 1:
-            return [(paths_set_1, paths_set_2, True)]
-        else:
-            follower = self.item.prod[self.item.lr_index + 1]
-            if follower == lookahead:
-                return [(paths_set_1, paths_set_2, False)]
-            else:
-                result = []
-                for successor, la in self.direct_successors.items():
-                    if la == follower:
-                        result += successor.forward_scan_lookahead(self, paths_set_1, paths_set_2)
-
-            return result
+    def direct_parent(self, path):
+        # this method expands path one level up using the item that has the shortest possible expansion
+        # that has the same leading symbols as this node
+        # avoid expansion of a recursive item
+        if self.item.name == path._node.item.name:
+            return path
+        prefix = self.item.prod[:self.item.lr_index]
+        candidates_1 = []
+        candidates_2 = []
+        for predecessor, la in path._node.direct_predecessors.items():
+            if la is None:
+                if predecessor.item.name == self.item.name:
+                    if predecessor.item.prod[:predecessor.item.lr_index] == prefix:
+                        candidates_1.append(predecessor)
+                    candidates_2.append(predecessor)
+        if candidates_1:
+            return path.derive_from(sorted(candidates_1, key=lambda n: len(n.item.prod))[0], None)
+        if candidates_2:
+            return path.derive_from(sorted(candidates_1, key=lambda n: len(n.item.prod))[0], None)
+        # not sure it should happen
+        return path
 
     def forward_scan_lookahead(self, paths, lookahead, first):
         # this method will explore the node's items to find lookahead, and if found, return the paths corresponding to the expansion
@@ -1836,23 +1827,23 @@ class LRTable(object):
                     out.append(' \u250a')
             out.append('')
 
-    def _search_reduce_counterexamples(conflict_shift_paths, conflict_reduce_paths, lookahead):
-        # search for a common node where reduce paths are followed by the lookahead
-        return conflict_shift_paths, conflict_reduce_paths
-
     def _log_counterexamples(self, node_map, example_1, example_2, lookahead, out):
-        seen = set([])
+        group_seen = set([])
         conflict_r1_paths = []
         conflict_r2_paths = []
         while node_map:
             (group, depth), (r1_paths, r2_paths) = node_map.popitem()
-            if (group, depth) in seen:
+            if (group, depth) in group_seen:
                 continue
             if len(r1_paths) == 0:
                 continue
             if len(r2_paths) == 0:
                 continue
-            seen.add((group, depth))
+            group_seen.add((group, depth))
+
+            # find common predecessors in this item group
+            # there could be none, in this case find_split will recurse into other groups
+            # until there is a group containing common predecessors
             common_predecessors = set(r1_paths[0]._node.predecessors)
             common_predecessors.add(r1_paths[0]._node)
             for p in r1_paths[1:]:
@@ -1867,6 +1858,22 @@ class LRTable(object):
             for r2_path in r2_paths:
                 conflict_r2_paths_tmp = r2_path._node.find_split(r2_path, common_predecessors, new_r2_items)
 
+            # fill node_map with paths discovered when looking for the split
+            for state, r1_paths in new_r1_items.items():
+                try:
+                    r2_paths = new_r2_items[state]
+                except KeyError:
+                    continue
+                else:
+                    try:
+                        s_p, r_p = node_map[(state, depth - 1)]
+                    except KeyError:
+                        node_map[(state, depth - 1)] = (r1_paths, r2_paths)
+                    else:
+                        s_p.extend(r1_paths)
+                        r_p.extend(r2_paths)
+
+            # this part takes care of paths that joined in this group, if they were found
             # make sure to go back to the origin of the reduce options (backtrack_depth)
             up_paths = []
             if len(conflict_r1_paths_tmp) > 0:
@@ -1878,29 +1885,22 @@ class LRTable(object):
                         up_paths += core_node.backtrack_up([p._node.backtrack_node(p, core_node) for p in conflict_r1_paths_tmp],
                                                            [p._node.backtrack_node(p, core_node) for p in conflict_r2_paths_tmp],
                                                            depth)
-                #elif lookahead is not None:
-                #    # join all paths at a common predecessor
-                #    direct_predecessors = set(conflict_r2_paths_tmp[0]._node.direct_predecessors)
-                #    for p in conflict_r2_paths_tmp:
-                #        direct_predecessors.update(p._node.direct_predecessors)
-                #    direct_predecessors.intersection_update(common_predecessors)
-                #    assert len(direct_predecessors) > 0
-                #    for core_node in direct_predecessors:
-                #        up_paths.append((conflict_r1_paths_tmp, [p._node.backtrack_node(p, core_node) for p in conflict_r2_paths_tmp]))
                 else:
                     up_paths = [(conflict_r1_paths_tmp, conflict_r2_paths_tmp)]
 
             for conflict_r1_paths_tmp, conflict_r2_paths_tmp in up_paths:
                 if lookahead:
-                    # For each set of paths in up_paths, the paths in the second list (the reduce paths) always start
-                    # from the same node.
-                    # Starting from this node, look for the rules that follow with the specified lookahead.
+                    # Process the second list (reduce list) to find a production following with lookahead.
+                    # For each set of paths in up_paths, the paths always have a common parent
+                    # Starting from this common node, look for the rules that follow with the specified lookahead.
                     # When a suitable node has been found, walk back to that node.
                     seen = set([])
                     queue = []
                     for predecessor, la in conflict_r2_paths_tmp[0]._node.direct_predecessors.items():
                         if la is None:
-                            queue.append((predecessor, conflict_r1_paths_tmp, [p.derive_from(predecessor, None) for p in conflict_r2_paths_tmp]))
+                            queue.append((predecessor,
+                                          [predecessor.direct_parent(p) for p in conflict_r1_paths_tmp],
+                                          [p.derive_from(predecessor, None) for p in conflict_r2_paths_tmp]))
                     while queue:
                         predecessor, conflict_r1_paths_tmp, conflict_r2_paths_tmp = queue.pop(0)
                         if predecessor in seen:
@@ -1918,7 +1918,9 @@ class LRTable(object):
                                 if up_count == 0:
                                     for node, la in predecessor.direct_predecessors.items():
                                         if la is None:
-                                            queue.append((node, conflict_r1_paths_tmp, [p.derive_from(node, None) for p in paths]))
+                                            queue.append((node,
+                                                            [node.direct_parent(p) for p in conflict_r1_paths_tmp],
+                                                            [p.derive_from(node, None) for p in paths]))
                             else:
                                 conflict_r2_paths += paths
                                 found = True
@@ -1929,19 +1931,6 @@ class LRTable(object):
                     conflict_r1_paths += conflict_r1_paths_tmp
                     conflict_r2_paths += conflict_r2_paths_tmp
 
-            for state, r1_paths in new_r1_items.items():
-                try:
-                    r2_paths = new_r2_items[state]
-                except KeyError:
-                    continue
-                else:
-                    try:
-                        s_p, r_p = node_map[(state, depth - 1)]
-                    except KeyError:
-                        node_map[(state, depth - 1)] = (r1_paths, r2_paths)
-                    else:
-                        s_p.extend(r1_paths)
-                        r_p.extend(r2_paths)
         self._log(example_1, conflict_r1_paths, out)
         self._log(example_2, conflict_r2_paths, out)
 
