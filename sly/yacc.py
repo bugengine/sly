@@ -33,7 +33,6 @@
 
 import sys
 import inspect
-import bisect
 from collections import OrderedDict, defaultdict, Counter
 
 __all__        = [ 'Parser' ]
@@ -502,8 +501,8 @@ class LRDominanceNode(object):
                                   depth))
                 for predecessor in node.predecessors:
                     queue.append((predecessor,
-                                  [path.derive_from(predecessor, self.predecessor_lookahead) for path in paths_set_1],
-                                  [path.derive_from(predecessor, self.predecessor_lookahead) for path in paths_set_2],
+                                  [path.derive_from(predecessor, node.predecessor_lookahead) for path in paths_set_1],
+                                  [path.derive_from(predecessor, node.predecessor_lookahead) for path in paths_set_2],
                                   depth - 1))
         return result
 
@@ -558,7 +557,7 @@ class LRItemSet(object):
         return self._items[item]
 
     def __repr__(self):
-        return f'LRItemSet({self})'
+        return f'LRItemSet({id(self)})'
 
     def add_core(self, core):
         for item, node, lookahead in core:
@@ -1719,7 +1718,7 @@ class LRTable(object):
                                             Productions[oldp.number].reduced -= 1
                                         else:
                                             chosenp, rejectp, chosenitem, rejecteditem = oldp, pp, olditem, pitem
-                                        self.rr_conflicts.append((st, chosenp, rejectp, I[chosenitem], I[rejecteditem]))
+                                        self.rr_conflicts.append((st, a, chosenp, rejectp, I[chosenitem], I[rejecteditem]))
                                         descrip.append('  ! reduce/reduce conflict for %s resolved using rule %d (%s)' % 
                                                        (a, st_actionp[a].number, st_actionp[a]))
                                         rr_conflict_count += 1
@@ -1910,8 +1909,8 @@ class LRTable(object):
                     queue = []
                     for parent in conflict_r2_paths_tmp[0]._node.direct_parents:
                         queue.append((parent,
-                                     [parent.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
-                                     [p.derive_from(parent, None) for p in conflict_r2_paths_tmp]))
+                                      [parent.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
+                                      [p.derive_from(parent, None) for p in conflict_r2_paths_tmp]))
                     while queue:
                         predecessor, conflict_r1_paths_tmp, conflict_r2_paths_tmp = queue.pop(0)
                         if predecessor in seen:
@@ -1926,10 +1925,10 @@ class LRTable(object):
                                 if up_count == 0:
                                     for node in predecessor.direct_parents:
                                         queue.append((node,
-                                                     [node.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
-                                                     [p.derive_from(node, None) for p in paths]))
-                                #else:
-                                #    assert False, "TODO"
+                                                        [node.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
+                                                        [p.derive_from(node, None) for p in paths]))
+                            #else:
+                            #    assert False, "TODO"
                             else:
                                 conflict_r2_paths += paths
                                 found = True
@@ -1961,19 +1960,24 @@ class LRTable(object):
                 self._log_counterexamples(dom_nodes, 'shift path', 'reduce path', tok, out)
 
 
-            already_reported = set()
-            for state, rule, rejected, node, rejected_node in self.rr_conflicts:
-                if (state, id(rule), id(rejected)) in already_reported:
-                    continue
-                out.append(f'reduce/reduce conflict in state {state} resolved using rule {rule}')
+            rr_conflict_map = {}
+            # group reduce/reduce conflicts per state, collect lookaheads
+            for i, (state, lookahead, rule, rejected, node, rejected_node) in enumerate(self.rr_conflicts):
+                try:
+                    rr_conflict_map[state, id(rule), id(rejected)][5].append(lookahead)
+                except KeyError:
+                    rr_conflict_map[state, id(rule), id(rejected)] = (i, rule, rejected, node, rejected_node, [lookahead])
+
+            for (state, _, _), (_, rule, rejected, node, rejected_node, lookaheads) in sorted(list(rr_conflict_map.items()), key=lambda x: (x[0][0], x[1][0])):
+                out.append(f'reduce/reduce conflict in state {state} resolved using rule {rule} for lookaheads {",".join(lookaheads)}')
                 out.append(f'rejected rule ({rejected}) in state {state}')
                 backtrack_size = max(len(rule), len(rejected))
-                already_reported.add((state, id(rule), id(rejected)))
-                dom_nodes = { (node.item_set, backtrack_size): ([LRPath(node, [])], [LRPath(rejected_node, None)]) }
-                self._log_counterexamples(dom_nodes, f'reduce using {rule}', f'reduce using {rejected}', None, out)
+                for la in lookaheads:
+                    dom_nodes = { (node.item_set, backtrack_size): ([LRPath(node, [])], [LRPath(rejected_node, None)]) }
+                    self._log_counterexamples(dom_nodes, f'reduce using {rule} ({la})', f'reduce using {rejected} ({la})', None, out)
 
             warned_never = set()
-            for state, rule, rejected, node, rejected_node in self.rr_conflicts:
+            for state, lookahead, rule, rejected, node, rejected_node in self.rr_conflicts:
                 if not rejected.reduced and (rejected not in warned_never):
                     out.append(f'Rule ({rejected}) is never reduced')
                     warned_never.add(rejected)
