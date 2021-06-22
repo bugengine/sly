@@ -1689,10 +1689,11 @@ class LRTable(object):
                                             # We really need to reduce here.
                                             st_action[a] = -p.number
                                             rejected = st_actionp[a]
+                                            shift_rule = st_actionp[a]
                                             st_actionp[a] = p
                                             if not slevel and not rlevel:
                                                 descrip.append(f'  ! shift/reduce conflict for {a} resolved as reduce')
-                                                self.sr_conflicts.append((st, a, 'reduce', I[rejected], I[p]))
+                                                self.sr_conflicts.append((st, a, 'reduce', I[rejected], I[p], shift_rule, p))
                                                 sr_conflict_count += 1
                                             Productions[p.number].reduced += 1
                                         elif (slevel == rlevel) and (rprec == 'nonassoc'):
@@ -1701,7 +1702,7 @@ class LRTable(object):
                                             # Hmmm. Guess we'll keep the shift
                                             if not rlevel:
                                                 descrip.append(f'  ! shift/reduce conflict for {a} resolved as shift')
-                                                self.sr_conflicts.append((st, a, 'shift', I[st_actionp[a]], I[p]))
+                                                self.sr_conflicts.append((st, a, 'shift', I[st_actionp[a]], I[p], st_actionp[a], p))
                                                 sr_conflict_count += 1
                                     elif r <= 0:
                                         # Reduce/reduce conflict.   In this case, we favor the rule
@@ -1754,11 +1755,12 @@ class LRTable(object):
                                             # We decide to shift here... highest precedence to shift
                                             Productions[st_actionp[a].number].reduced -= 1
                                             reduce = st_actionp[a]
+                                            reduce_rule = st_actionp[a]
                                             st_action[a] = j
                                             st_actionp[a] = p
                                             if not rlevel:
                                                 descrip.append(f'  ! shift/reduce conflict for {a} resolved as shift')
-                                                self.sr_conflicts.append((st, a, 'shift', I[p], I[reduce]))
+                                                self.sr_conflicts.append((st, a, 'shift', I[p], I[reduce], p, reduce_rule))
                                                 sr_conflict_count += 1
                                         elif (slevel == rlevel) and (rprec == 'nonassoc'):
                                             st_action[a] = None
@@ -1766,7 +1768,7 @@ class LRTable(object):
                                             # Hmmm. Guess we'll keep the reduce
                                             if not slevel and not rlevel:
                                                 descrip.append(f'  ! shift/reduce conflict for {a} resolved as reduce')
-                                                self.sr_conflicts.append((st, a, 'reduce', I[p], I[st_action[a]]))
+                                                self.sr_conflicts.append((st, a, 'reduce', I[p], I[st_action[a]], p, st_actionp[a]))
                                                 sr_conflict_count += 1
 
                                     else:
@@ -1954,10 +1956,10 @@ class LRTable(object):
         if self.sr_conflicts or self.rr_conflicts:
             out.append('\nConflicts:\n')
 
-            for state, tok, resolution, shift_node, reduce_node in self.sr_conflicts:
+            for state, tok, resolution, shift_node, reduce_node, shift_rule, reduce_rule in self.sr_conflicts:
                 out.append(f'shift/reduce conflict for {tok} in state {state} resolved as {resolution}')
                 dom_nodes = { (shift_node.item_set, reduce_node.item.lr_index): ([LRPath(shift_node, None)], [LRPath(reduce_node, None)]) }
-                self._log_counterexamples(dom_nodes, 'shift path', 'reduce path', tok, out)
+                self._log_counterexamples(dom_nodes, f'shift using rule {shift_rule}', f'reduce using rule {reduce_rule}', tok, out)
 
 
             rr_conflict_map = {}
