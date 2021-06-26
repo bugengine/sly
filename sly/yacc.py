@@ -453,6 +453,7 @@ class LRDominanceNode(object):
         # it will only find paths that can be followed by lookahead
         queue = [(path, lookahead)]
         result = []
+        shortest_path_seen = set()
         while queue:
             path, lookahead = queue.pop(0)
             node = path._node
@@ -460,21 +461,16 @@ class LRDominanceNode(object):
                 if (parent, lookahead) in seen:
                     continue
                 seen.add((parent, lookahead))
+                if parent.item.lr_index > 0:
+                    if (lookahead, parent.item_set, parent.item.prod[:parent.item.lr_index]) in shortest_path_seen:
+                        continue
                 for p, la in parent.filter_node_by_lookahead(path.derive_from(parent, None),
                                                              lookahead,
                                                              first_set):
+                    if parent.item.lr_index > 0 and la is None:
+                        shortest_path_seen.add((lookahead, parent.item_set, parent.item.prod[:parent.item.lr_index]))
                     if la is None and state is None:
-                        if parent.item.lr_index > 0:
-                            if (parent.item.prod[:parent.item.lr_index]) in seen:
-                                continue
-                            seen.add((parent.item.prod[:parent.item.lr_index]))
                         result.append((p, la))
-                    elif la is None:
-                        if parent.item.lr_index > 0:
-                            if (parent.item.prod[:parent.item.lr_index]) in seen:
-                                continue
-                            seen.add((parent.item.prod[:parent.item.lr_index]))
-                        queue.append((p, la))
                     else:
                         queue.append((p, la))
             for predecessor in node.predecessors:
@@ -482,28 +478,11 @@ class LRDominanceNode(object):
                     continue
                 seen.add((predecessor, lookahead))
                 if state is None or predecessor.item_set == state:
+                    if predecessor.item.lr_index > 0:
+                        if (lookahead, predecessor.item_set, predecessor.item.prod[:predecessor.item.lr_index]) in shortest_path_seen:
+                            continue
+                        shortest_path_seen.add((lookahead, predecessor.item_set, predecessor.item.prod[:predecessor.item.lr_index]))
                     result.append((path.derive_from(predecessor, node.predecessor_lookahead), lookahead))
-        return result
-
-    def find_split(self, path, common_parents):
-        queue = [(self, path)]
-        seen = set([])
-        result = []
-
-        while queue:
-            node, path = queue.pop(0)
-            if node in seen:
-                continue
-            seen.add(node)
-            if node in common_parents:
-                result.append(path)
-            
-            for parent in node.direct_parents:
-                if parent in common_parents:
-                    # this node is the direct successor of a split; stop recursion here
-                    result.append(path)
-                else:
-                    queue.append((parent, path.derive_from(parent, None)))
         return result
 
 # -----------------------------------------------------------------------------
