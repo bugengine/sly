@@ -350,10 +350,13 @@ class LRPath(object):
         self._node = node
         if sequence:
             self._sequence = sequence
-        elif use_marker:
-            self._sequence = [LRPath.LRPathItem('\u2666')] + [LRPath.LRPathItem(i) for i in self._node.item.prod[self._node.item.lr_index+1:]]
         else:
-            self._sequence = [LRPath.LRPathItem(i) for i in self._node.item.prod[self._node.item.lr_index+1:]]
+            if use_marker:
+                self._sequence = [LRPath.LRPathItem('\u2666')] + [LRPath.LRPathItem(i) for i in self._node.item.prod[self._node.item.lr_index+1:]]
+            else:
+                self._sequence = [LRPath.LRPathItem(i) for i in self._node.item.prod[self._node.item.lr_index+1:]]
+            if node.item.number == 0:
+                self._sequence.append(LRPath.LRPathItem('$end'))
         self._hash = sum([s._hash for s in self._sequence], start=(node.item, ))
 
     def __hash__(self):
@@ -365,6 +368,8 @@ class LRPath(object):
     def derive_from(self, node, lookahead):
         if lookahead is None:
             result = LRPath(node, [self] + [LRPath.LRPathItem(i) for i in node.item.prod[node.item.lr_index+2:]])
+            if node.item.number == 0:
+                result._sequence.append(LRPath.LRPathItem('$end'))
         else:
             result = LRPath(node, [LRPath.LRPathItem(lookahead)] + self._sequence)
         return result
@@ -422,91 +427,65 @@ class LRDominanceNode(object):
             parent.direct_children.append(self)
             parent.children.add(self)
 
-    def backtrace_direct_parent(self, path):
-        # this method expands path one level up using the item that has the shortest possible expansion
-        # that has the same leading symbols as this node
-        # avoid expansion of a recursive item
-        if self.item.name == path._node.item.name:
-            return path
-        prefix = self.item.prod[:self.item.lr_index]
-        candidates_1 = []
-        candidates_2 = []
-        for parent in path._node.direct_parents:
-            if parent.item.name == self.item.name:
-                if parent.item.prod[:parent.item.lr_index] == prefix:
-                    candidates_1.append(parent)
-                candidates_2.append(parent)
-        if candidates_1:
-            return path.derive_from(sorted(candidates_1, key=lambda n: len(n.item.prod))[0], None)
-        if candidates_2:
-            return path.derive_from(sorted(candidates_1, key=lambda n: len(n.item.prod))[0], None)
-        # not sure it should happen
-        return path
-
-    def forward_scan_lookahead(self, paths, lookahead, first):
-        # this method will explore the node's items to find lookahead, and if found, return the paths corresponding to the expansion
-        # TODO: actual expansions
-        node = self
+    def filter_node_by_lookahead(self, path, lookahead, first_set):
         result = []
-        while node.item.lr_index < len(node.item.prod) - 1:
-            next_symbol = node.item.prod[node.item.lr_index + 1]
-            symbol_first = first[next_symbol]
-            if lookahead in symbol_first:
-                result.append((paths, False))
-            if '<empty>' in symbol_first:
-                node = node.successor
-            else:
-                return result
-
-        return result + [(paths, True)]
-
-    def backtrack_node(self, path, target_parent):
-        # this method will find the fastest path from self to the specified parent
-        if target_parent == self:
-            return path
-        assert target_parent in self.parents
-        queue = [(self, path)]
-        seen = set([])
-
-        while queue:
-            node, path = queue.pop(0)
-            if node in seen:
-                continue
-            seen.add(node)
-            for parent in node.direct_parents:
-                if parent == target_parent:
-                    return path.derive_from(parent, None)
+        if lookahead is not None:
+            try:
+                following_symbol = self.item.prod[self.item.lr_index+2]
+            except IndexError:
+                if lookahead == '$end' and self.item.number == 0:
+                    result.append((path, None))
                 else:
-                    queue.append((parent, path.derive_from(parent, None)))
-        return None
-
-    def backtrack_up(self, paths_set_1, paths_set_2, depth):
-        # this method will find the fastest path from self to the specified parent
-        queue = [(self, paths_set_1, paths_set_2, depth)]
-        seen = set([])
-        result = []
-        while queue:
-            node, paths_set_1, paths_set_2, depth = queue.pop(0)
-            if (node, depth) in seen:
-                continue
-            seen.add((node, depth))
-
-            if depth == 0:
-                result.append((paths_set_1, paths_set_2))
+                    result.append((path, lookahead))
             else:
-                for parent in node.direct_parents:
-                    queue.append((parent,
-                                  [path.derive_from(parent, None) for path in paths_set_1],
-                                  [path.derive_from(parent, None) for path in paths_set_2],
-                                  depth))
-                for predecessor in node.predecessors:
-                    queue.append((predecessor,
-                                  [path.derive_from(predecessor, node.predecessor_lookahead) for path in paths_set_1],
-                                  [path.derive_from(predecessor, node.predecessor_lookahead) for path in paths_set_2],
-                                  depth - 1))
+                if '<empty>' in first_set[following_symbol]:
+                    # todo: expand sequence
+                    result += self.successor.filter_node_by_lookahead(path, lookahead, first_set)
+                if lookahead in first_set[following_symbol]:
+                    # todo: expand sequence
+                    result.append((path, None))
+        else:
+            result.append((path, lookahead))
         return result
 
-    def find_split(self, path, common_parents, outside_predecessors):
+    def backtrack_up(self, path, state, lookahead, first_set, seen):
+        # this method will find the fastest path from self to the specified parent state
+        # it will only find paths that can be followed by lookahead
+        queue = [(path, lookahead)]
+        result = []
+        while queue:
+            path, lookahead = queue.pop(0)
+            node = path._node
+            for parent in sorted(node.direct_parents, key=lambda n: len(n.item.prod) - n.item.lr_index):
+                if (parent, lookahead) in seen:
+                    continue
+                seen.add((parent, lookahead))
+                for p, la in parent.filter_node_by_lookahead(path.derive_from(parent, None),
+                                                             lookahead,
+                                                             first_set):
+                    if la is None and state is None:
+                        if parent.item.lr_index > 0:
+                            if (parent.item.prod[:parent.item.lr_index]) in seen:
+                                continue
+                            seen.add((parent.item.prod[:parent.item.lr_index]))
+                        result.append((p, la))
+                    elif la is None:
+                        if parent.item.lr_index > 0:
+                            if (parent.item.prod[:parent.item.lr_index]) in seen:
+                                continue
+                            seen.add((parent.item.prod[:parent.item.lr_index]))
+                        queue.append((p, la))
+                    else:
+                        queue.append((p, la))
+            for predecessor in node.predecessors:
+                if (predecessor, lookahead) in seen:
+                    continue
+                seen.add((predecessor, lookahead))
+                if state is None or predecessor.item_set == state:
+                    result.append((path.derive_from(predecessor, node.predecessor_lookahead), lookahead))
+        return result
+
+    def find_split(self, path, common_parents):
         queue = [(self, path)]
         seen = set([])
         result = []
@@ -525,12 +504,6 @@ class LRDominanceNode(object):
                     result.append(path)
                 else:
                     queue.append((parent, path.derive_from(parent, None)))
-            for predecessor in node.predecessors:
-                # register predecessors from other state for the caller to recurse into
-                try:
-                    outside_predecessors[predecessor.item_set].append(path.derive_from(predecessor, node.predecessor_lookahead))
-                except KeyError:
-                    outside_predecessors[predecessor.item_set] = [path.derive_from(predecessor, node.predecessor_lookahead)]
         return result
 
 # -----------------------------------------------------------------------------
@@ -564,12 +537,16 @@ class LRItemSet(object):
             try:
                 target_node = self._items[item]
             except KeyError:
-                target_node = LRDominanceNode(self, item, predecessor = (lookahead, node))
+                if node is not None:
+                    target_node = LRDominanceNode(self, item, predecessor = (lookahead, node))
+                else:
+                    target_node = LRDominanceNode(self, item)
                 self._items[item] = target_node
             else:
                 assert node not in target_node.predecessors
                 target_node.predecessors.append(node)
-            node.successor = target_node
+            if node is not None:
+                node.successor = target_node
             self._core.add(target_node)
 
     def _lr0_close(self):
@@ -1296,8 +1273,7 @@ class LRTable(object):
 
     # Compute the LR(0) sets of item function
     def lr0_items(self):
-        root_node = LRDominanceNode(None, self.grammar.Productions[0].lr_next)
-        C = [LRItemSet([(self.grammar.Productions[0].lr_next, root_node, '$start')])]
+        C = [LRItemSet([(self.grammar.Productions[0].lr_next, None, '$start')])]
         i = 0
         for I in C:
             self.lr0_cidhash[id(I)] = i
@@ -1826,123 +1802,82 @@ class LRTable(object):
                     self.edge_description += [f'    {id(predecessor)}->{id(node)}[label="{node.predecessor_lookahead}"];']
 
     def _log(self, title, conflict_paths, out):
+        seen = set([])
         if conflict_paths:
-            conflict_paths = set(conflict_paths)
-            out.append(f' \u256d {title}')
-            out.append(' \u250a')
-            for i, path in enumerate(conflict_paths):
+            count = len(set(conflict_paths))
+            out.append(f'   {title}')
+            out.append('   \u256d\u2574')
+            for path in conflict_paths:
+                if path in seen:
+                    continue
+                count -= 1
+                seen.add(path)
                 strings = path.expand_left().to_string()[0]
                 for s in strings:
-                    out.append(f' \u2502 {s}')
-                if i == len(conflict_paths) - 1:
-                    out.append(' \u2570')
+                    out.append(f'   \u2502 {s}')
+                if count == 0:
+                    out.append('   \u2570\u2574')
                 else:
-                    out.append(' \u250a')
-            out.append('')
+                    out.append('   \u251c\u2574')
 
-    def _log_counterexamples(self, node_map, example_1, example_2, lookahead, out):
-        group_seen = set([])
+    def _log_counterexamples(self, node_1, example_1, lookahead_1, node_2, example_2, lookahead_2, out):
         conflict_r1_paths = []
         conflict_r2_paths = []
-        while node_map:
-            (group, depth), (r1_paths, r2_paths) = node_map.popitem()
-            if (group, depth) in group_seen:
-                continue
-            if len(r1_paths) == 0:
-                continue
-            if len(r2_paths) == 0:
-                continue
-            group_seen.add((group, depth))
+        seen_1 = set()
+        seen_2 = set()
 
-            # find common parents in this item group
-            # there could be none, in this case find_split will recurse into other groups
-            # until there is a group containing common predecessors
-            common_parents = set(r1_paths[0]._node.parents)
-            common_parents.add(r1_paths[0]._node)
-            for p in r1_paths[1:]:
-                common_parents.intersection_update(p._node.parents.union([p._node]))
-            for p in r2_paths:
-                common_parents.intersection_update(p._node.parents.union([p._node]))
-            
-            new_r1_items = {}
-            new_r2_items = {}
-            for r1_path in r1_paths:
-                conflict_r1_paths_tmp = r1_path._node.find_split(r1_path, common_parents, new_r1_items)
-            for r2_path in r2_paths:
-                conflict_r2_paths_tmp = r2_path._node.find_split(r2_path, common_parents, new_r2_items)
-
-            # fill node_map with paths discovered when looking for the split
-            for state, r1_paths in new_r1_items.items():
-                try:
-                    r2_paths = new_r2_items[state]
-                except KeyError:
-                    continue
+        queue = [((LRPath(node_1, []), lookahead_1), (LRPath(node_2, []), lookahead_2))]
+        while queue:
+            (path_1, lookahead_1), (path_2, lookahead_2) = queue.pop(0)
+            #assert path_1._node.item_set == path_2._node.item_set
+            if path_1._node.item.lr_index == 0 and path_2._node.item.lr_index == 0:
+                if lookahead_1 is None and lookahead_2 is None:
+                    conflict_r1_paths.append(path_1)
+                    conflict_r2_paths.append(path_2)
+                elif lookahead_1 is not None:
+                    for path1, la1 in path_1._node.backtrack_up(path_1, None, lookahead_1, self.grammar.First, seen_1):
+                        if path1._node.item_set == path_2._node.item_set:
+                            assert path1._node.item_set == path_2._node.item_set
+                            queue.append(((path1, la1), (path_2, lookahead_2)))
+                        else:
+                            for path2, la2 in path_2._node.backtrack_up(path_2, path1._node.item_set, lookahead_2, self.grammar.First, seen_2):
+                                #assert path1._node.item_set == path2._node.item_set
+                                queue.append(((path1, la1), (path2, la2)))
                 else:
-                    try:
-                        s_p, r_p = node_map[(state, depth - 1)]
-                    except KeyError:
-                        node_map[(state, depth - 1)] = (r1_paths, r2_paths)
-                    else:
-                        s_p.extend(r1_paths)
-                        r_p.extend(r2_paths)
-
-            # this part takes care of paths that joined in this group, if they were found
-            # make sure to go back to the origin of the reduce options (backtrack_depth)
-            up_paths = []
-            if len(conflict_r1_paths_tmp) > 0:
-                assert len(conflict_r2_paths_tmp) > 0
-                if depth > 0:
-                    core_common_parents = common_parents.intersection(group._core)
-                    assert len(core_common_parents) > 0
-                    for core_node in core_common_parents:
-                        up_paths += core_node.backtrack_up([p._node.backtrack_node(p, core_node) for p in conflict_r1_paths_tmp],
-                                                           [p._node.backtrack_node(p, core_node) for p in conflict_r2_paths_tmp],
-                                                           depth)
+                    for path2, la2 in path_2._node.backtrack_up(path_2, None, lookahead_2, self.grammar.First, seen_2):
+                        if path_1._node.item_set == path2._node.item_set:
+                            assert path_1._node.item_set == path2._node.item_set
+                            queue.append(((path_1, lookahead_1), (path2, la2)))
+                        else:
+                            for path1, la1 in path_1._node.backtrack_up(path_1, path2._node.item_set, lookahead_1, self.grammar.First, seen_1):
+                                #assert path1._node.item_set == path2._node.item_set
+                                queue.append(((path1, la1), (path2, la2)))
+            else:
+                if path_1._node.item.lr_index == 0:
+                    for pred_2 in path_2._node.predecessors:
+                        parent_paths = path_1._node.backtrack_up(path_1, pred_2.item_set, lookahead_1, self.grammar.First, set())
+                        for p, la in parent_paths:
+                            assert p._node.item_set == pred_2.item_set
+                            queue.append(((p, la), (path_2.derive_from(pred_2, path_2._node.predecessor_lookahead), lookahead_2)))
+                elif path_2._node.item.lr_index == 0:
+                    for pred_1 in path_1._node.predecessors:
+                        parent_paths = path_2._node.backtrack_up(path_2, pred_1.item_set, lookahead_2, self.grammar.First, set())
+                        for p, la in parent_paths:
+                            assert pred_1.item_set == p._node.item_set
+                            queue.append(((path_1.derive_from(pred_1, path_1._node.predecessor_lookahead), lookahead_1), (p, la)))
                 else:
-                    up_paths = [(conflict_r1_paths_tmp, conflict_r2_paths_tmp)]
+                    # reduce path_1 and path_2
+                    for pred_1 in path_1._node.predecessors:
+                        for pred_2 in path_2._node.predecessors:
+                            if pred_1.item_set == pred_2.item_set and pred_1.item_set != path_1._node.item_set:
+                                queue.append(((path_1.derive_from(pred_1, path_1._node.predecessor_lookahead), lookahead_1),
+                                              (path_2.derive_from(pred_2, path_2._node.predecessor_lookahead), lookahead_2)))
 
-            seen = set([])
-            for conflict_r1_paths_tmp, conflict_r2_paths_tmp in up_paths:
-                if lookahead:
-                    # Process the second list (reduce list) to find a production following with lookahead.
-                    # For each set of paths in up_paths, the paths always have a common parent
-                    # Starting from this common node, look for the rules that follow with the specified lookahead.
-                    # When a suitable node has been found, walk back to that node.
-                    queue = []
-                    for parent in conflict_r2_paths_tmp[0]._node.direct_parents:
-                        queue.append((parent,
-                                      [parent.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
-                                      [p.derive_from(parent, None) for p in conflict_r2_paths_tmp]))
-                    while queue:
-                        predecessor, conflict_r1_paths_tmp, conflict_r2_paths_tmp = queue.pop(0)
-                        if predecessor in seen:
-                            continue
-                        seen.add(predecessor)
-                        node = predecessor.successor
-                        for paths, can_expand in node.forward_scan_lookahead(conflict_r2_paths_tmp, lookahead, self.grammar.First):
-                            found = False
-                            if can_expand:
-                                # need to rewind
-                                up_count = predecessor.item.lr_index
-                                if up_count == 0:
-                                    for node in predecessor.direct_parents:
-                                        queue.append((node,
-                                                        [node.backtrace_direct_parent(p) for p in conflict_r1_paths_tmp],
-                                                        [p.derive_from(node, None) for p in paths]))
-                            #else:
-                            #    assert False, "TODO"
-                            else:
-                                conflict_r2_paths += paths
-                                found = True
-                            if found:
-                                # if some reduce paths have been found, add shift paths
-                                conflict_r1_paths += conflict_r1_paths_tmp
-                else:
-                    conflict_r1_paths += conflict_r1_paths_tmp
-                    conflict_r2_paths += conflict_r2_paths_tmp
 
         self._log(example_1, conflict_r1_paths, out)
+        out.append('')
         self._log(example_2, conflict_r2_paths, out)
+        out.append('')
 
     # ----------------------------------------------------------------------
     # Debugging output.   Printing the LRTable object will produce a listing
@@ -1958,8 +1893,8 @@ class LRTable(object):
 
             for state, tok, resolution, shift_node, reduce_node, shift_rule, reduce_rule in self.sr_conflicts:
                 out.append(f'shift/reduce conflict for {tok} in state {state} resolved as {resolution}')
-                dom_nodes = { (shift_node.item_set, reduce_node.item.lr_index): ([LRPath(shift_node, None)], [LRPath(reduce_node, None)]) }
-                self._log_counterexamples(dom_nodes, f'shift using rule {shift_rule}', f'reduce using rule {reduce_rule}', tok, out)
+                self._log_counterexamples(shift_node, f'shift using rule {shift_rule}', None,
+                                          reduce_node, f'reduce using rule {reduce_rule}', tok, out)
 
 
             rr_conflict_map = {}
@@ -1971,12 +1906,11 @@ class LRTable(object):
                     rr_conflict_map[state, id(rule), id(rejected)] = (i, rule, rejected, node, rejected_node, [lookahead])
 
             for (state, _, _), (_, rule, rejected, node, rejected_node, lookaheads) in sorted(list(rr_conflict_map.items()), key=lambda x: (x[0][0], x[1][0])):
-                out.append(f'reduce/reduce conflict in state {state} resolved using rule {rule} for lookaheads {",".join(lookaheads)}')
-                out.append(f'rejected rule ({rejected}) in state {state}')
-                backtrack_size = max(len(rule), len(rejected))
                 for la in lookaheads:
-                    dom_nodes = { (node.item_set, backtrack_size): ([LRPath(node, [])], [LRPath(rejected_node, None)]) }
-                    self._log_counterexamples(dom_nodes, f'reduce using {rule} ({la})', f'reduce using {rejected} ({la})', None, out)
+                    out.append(f'reduce/reduce conflict for {la} in state {state} resolved using rule {rule}')
+                    out.append(f'rejected rule ({rejected}) in state {state}')
+                    self._log_counterexamples(node, f'reduce using {rule} with lookahead {la}', la,
+                                              rejected_node, f'reduce using {rejected} with lookahead {la}', la, out)
 
             warned_never = set()
             for state, lookahead, rule, rejected, node, rejected_node in self.rr_conflicts:
