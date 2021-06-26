@@ -378,7 +378,7 @@ class LRPath(object):
         return LRPath(self._node, [LRPath.LRPathItem(i) for i in self._node.item.prod[:self._node.item.lr_index]] + self._sequence)
 
     def expand(self, index, path):
-        return LRPath(self._node, self._sequence[:index] + [path] + self._sequence[index+1:])
+        return LRPath(self._node, self._sequence[:index] + path._sequence)
 
     def to_string(self):
         expanded_symbol = self._node.item.name
@@ -427,6 +427,55 @@ class LRDominanceNode(object):
             parent.direct_children.append(self)
             parent.children.add(self)
 
+    def expand_empty(self, first_set):
+        # expand the first item of the path to build empty productions
+        if self.item.lr_index == len(self.item.prod) - 1:
+            return LRPath(self, [], use_marker=False)
+        for child in self.direct_children:
+            try:
+                following_symbol = child.item.prod[1]
+            except IndexError:
+                result = LRPath(child, [], use_marker=False)
+                result = result.derive_from(self, None)
+                return result
+            else:
+                if '<empty>' in first_set[following_symbol]:
+                    p = child.successor.expand_empty(first_set)
+                    if p:
+                        result = child.expand_empty(first_set)
+                        result = result.expand(1, p)
+                        result = result.derive_from(self, None)
+                        return result
+        return None
+
+    def expand_lookahead(self, lookahead, first_set):
+        # expand the first item of the path until it starts with the lookahead
+        if self.item.prod[self.item.lr_index+1] == lookahead:
+            return LRPath(self, [], use_marker=False)
+        for child in self.direct_children:
+            try:
+                following_symbol = child.item.prod[1]
+            except IndexError:
+                pass
+            else:
+                if lookahead == following_symbol:
+                    result = LRPath(child, [], use_marker=False)
+                    result = result.derive_from(self, None)
+                    return result
+                elif lookahead in first_set[following_symbol]:
+                    result = child.expand_lookahead(lookahead, first_set)
+                    result = result.derive_from(self, None)
+                    return result
+                elif '<empty>' in first_set[following_symbol]:
+                    p = child.successor.expand_lookahead(lookahead, first_set)
+                    if p:
+                        result = child.expand_empty(first_set)
+                        result = result.expand(1, p)
+                        result = result.derive_from(self, None)
+                        return result
+        return None
+
+
     def filter_node_by_lookahead(self, path, lookahead, first_set):
         result = []
         if lookahead is not None:
@@ -439,11 +488,14 @@ class LRDominanceNode(object):
                     result.append((path, lookahead))
             else:
                 if '<empty>' in first_set[following_symbol]:
-                    # todo: expand sequence
-                    result += self.successor.filter_node_by_lookahead(path, lookahead, first_set)
+                    successor_path = self.successor.expand_empty(first_set)
+                    for p, lookahead in self.successor.filter_node_by_lookahead(successor_path, lookahead, first_set):
+                        result.append((path.expand(1, p), lookahead))
                 if lookahead in first_set[following_symbol]:
-                    # todo: expand sequence
-                    result.append((path, None))
+                    successor_path = self.successor.expand_lookahead(lookahead, first_set)
+                    if successor_path is None:
+                        successor_path = self.successor.expand_lookahead(lookahead, first_set)
+                    result.append((path.expand(1, successor_path), None))
         else:
             result.append((path, lookahead))
         return result
