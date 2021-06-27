@@ -489,12 +489,10 @@ class LRDominanceNode(object):
             else:
                 if '<empty>' in first_set[following_symbol]:
                     successor_path = self.successor.expand_empty(first_set)
-                    for p, lookahead in self.successor.filter_node_by_lookahead(successor_path, lookahead, first_set):
-                        result.append((path.expand(1, p), lookahead))
+                    for p, la in self.successor.filter_node_by_lookahead(successor_path, lookahead, first_set):
+                        result.append((path.expand(1, p), la))
                 if lookahead in first_set[following_symbol]:
                     successor_path = self.successor.expand_lookahead(lookahead, first_set)
-                    if successor_path is None:
-                        successor_path = self.successor.expand_lookahead(lookahead, first_set)
                     result.append((path.expand(1, successor_path), None))
         else:
             result.append((path, lookahead))
@@ -546,8 +544,6 @@ class LRDominanceNode(object):
 # -----------------------------------------------------------------------------
 
 class LRItemSet(object):
-    _ADD_COUNT = 0
-
     def __init__(self, core):
         self._core = set([])
         self._items = {}
