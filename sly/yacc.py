@@ -431,7 +431,7 @@ class LRDominanceNode(object):
         # expand the first item of the path to build empty productions
         if self.item.lr_index == len(self.item.prod) - 1:
             return LRPath(self, [], use_marker=False)
-        for child in self.direct_children:
+        for child in sorted(self.direct_children, key=lambda n: len(n.item.prod)):
             try:
                 following_symbol = child.item.prod[1]
             except IndexError:
@@ -452,7 +452,7 @@ class LRDominanceNode(object):
         # expand the first item of the path until it starts with the lookahead
         if self.item.prod[self.item.lr_index+1] == lookahead:
             return LRPath(self, [], use_marker=False)
-        for child in self.direct_children:
+        for child in sorted(self.direct_children, key=lambda n: len(n.item.prod)):
             if child in seen:
                 continue
             seen.add(child)
