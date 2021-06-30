@@ -448,11 +448,14 @@ class LRDominanceNode(object):
                         return result
         return None
 
-    def expand_lookahead(self, lookahead, first_set):
+    def expand_lookahead(self, lookahead, first_set, seen):
         # expand the first item of the path until it starts with the lookahead
         if self.item.prod[self.item.lr_index+1] == lookahead:
             return LRPath(self, [], use_marker=False)
         for child in self.direct_children:
+            if child in seen:
+                continue
+            seen.add(child)
             try:
                 following_symbol = child.item.prod[1]
             except IndexError:
@@ -463,11 +466,11 @@ class LRDominanceNode(object):
                     result = result.derive_from(self, None)
                     return result
                 elif lookahead in first_set[following_symbol]:
-                    result = child.expand_lookahead(lookahead, first_set)
+                    result = child.expand_lookahead(lookahead, first_set, seen)
                     result = result.derive_from(self, None)
                     return result
                 elif '<empty>' in first_set[following_symbol]:
-                    p = child.successor.expand_lookahead(lookahead, first_set)
+                    p = child.successor.expand_lookahead(lookahead, first_set, seen)
                     if p:
                         result = child.expand_empty(first_set)
                         result = result.expand(1, p)
@@ -492,7 +495,7 @@ class LRDominanceNode(object):
                     for p, la in self.successor.filter_node_by_lookahead(successor_path, lookahead, first_set):
                         result.append((path.expand(1, p), la))
                 if lookahead in first_set[following_symbol]:
-                    successor_path = self.successor.expand_lookahead(lookahead, first_set)
+                    successor_path = self.successor.expand_lookahead(lookahead, first_set, set())
                     result.append((path.expand(1, successor_path), None))
         else:
             result.append((path, lookahead))
@@ -1856,7 +1859,6 @@ class LRTable(object):
         queue = [((LRPath(node_1, []), lookahead_1), (LRPath(node_2, []), lookahead_2))]
         while queue:
             (path_1, lookahead_1), (path_2, lookahead_2) = queue.pop(0)
-            #assert path_1._node.item_set == path_2._node.item_set
             if path_1._node.item.lr_index == 0 and path_2._node.item.lr_index == 0:
                 if lookahead_1 is None and lookahead_2 is None:
                     conflict_r1_paths.append(path_1)
@@ -1864,33 +1866,27 @@ class LRTable(object):
                 elif lookahead_1 is not None:
                     for path1, la1 in path_1._node.backtrack_up(path_1, None, lookahead_1, self.grammar.First, seen_1):
                         if path1._node.item_set == path_2._node.item_set:
-                            assert path1._node.item_set == path_2._node.item_set
                             queue.append(((path1, la1), (path_2, lookahead_2)))
                         else:
                             for path2, la2 in path_2._node.backtrack_up(path_2, path1._node.item_set, lookahead_2, self.grammar.First, seen_2):
-                                #assert path1._node.item_set == path2._node.item_set
                                 queue.append(((path1, la1), (path2, la2)))
                 else:
                     for path2, la2 in path_2._node.backtrack_up(path_2, None, lookahead_2, self.grammar.First, seen_2):
                         if path_1._node.item_set == path2._node.item_set:
-                            assert path_1._node.item_set == path2._node.item_set
                             queue.append(((path_1, lookahead_1), (path2, la2)))
                         else:
                             for path1, la1 in path_1._node.backtrack_up(path_1, path2._node.item_set, lookahead_1, self.grammar.First, seen_1):
-                                #assert path1._node.item_set == path2._node.item_set
                                 queue.append(((path1, la1), (path2, la2)))
             else:
                 if path_1._node.item.lr_index == 0:
                     for pred_2 in path_2._node.predecessors:
                         parent_paths = path_1._node.backtrack_up(path_1, pred_2.item_set, lookahead_1, self.grammar.First, set())
                         for p, la in parent_paths:
-                            assert p._node.item_set == pred_2.item_set
                             queue.append(((p, la), (path_2.derive_from(pred_2, path_2._node.predecessor_lookahead), lookahead_2)))
                 elif path_2._node.item.lr_index == 0:
                     for pred_1 in path_1._node.predecessors:
                         parent_paths = path_2._node.backtrack_up(path_2, pred_1.item_set, lookahead_2, self.grammar.First, set())
                         for p, la in parent_paths:
-                            assert pred_1.item_set == p._node.item_set
                             queue.append(((path_1.derive_from(pred_1, path_1._node.predecessor_lookahead), lookahead_1), (p, la)))
                 else:
                     # reduce path_1 and path_2
