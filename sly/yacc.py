@@ -33,6 +33,7 @@
 
 import sys
 import inspect
+import functools
 from collections import OrderedDict, defaultdict, Counter
 
 __all__        = [ 'Parser' ]
@@ -448,34 +449,40 @@ class LRDominanceNode(object):
                         return result
         return None
 
-    def expand_lookahead(self, lookahead, first_set, seen):
+    def expand_lookahead(self, lookahead, first_set):
         # expand the first item of the path until it starts with the lookahead
         if self.item.prod[self.item.lr_index+1] == lookahead:
             return LRPath(self, [], use_marker=False)
-        for child in sorted(self.direct_children, key=lambda n: len(n.item.prod)):
-            if child in seen:
+        queue = [(self, [[]])]
+        seen = set()
+
+        while queue:
+            node, paths = queue.pop(0)
+            if node in seen:
                 continue
-            seen.add(child)
+            seen.add(node)
+
             try:
-                following_symbol = child.item.prod[1]
+                following_symbol = node.item.prod[node.item.lr_index+1]
             except IndexError:
-                pass
-            else:
-                if lookahead == following_symbol:
-                    result = LRPath(child, [], use_marker=False)
-                    result = result.derive_from(self, None)
-                    return result
-                elif lookahead in first_set[following_symbol]:
-                    result = child.expand_lookahead(lookahead, first_set, seen)
-                    result = result.derive_from(self, None)
-                    return result
-                elif '<empty>' in first_set[following_symbol]:
-                    p = child.successor.expand_lookahead(lookahead, first_set, seen)
-                    if p:
-                        result = child.expand_empty(first_set)
-                        result = result.expand(1, p)
-                        result = result.derive_from(self, None)
-                        return result
+                continue
+
+            if following_symbol == lookahead:
+                result = None
+                paths[-1].append(LRPath(node, [], use_marker=False))
+                while paths:
+                    child_paths = paths.pop(-1)
+                    if result is not None:
+                        child_paths[-1] = child_paths[-1].expand(1, result)
+                    merge_children = lambda x, y: x.derive_from(y._node, None)
+                    result = functools.reduce(merge_children, child_paths[::-1])
+                return result
+            elif lookahead in first_set[following_symbol]:
+                for child in sorted(node.direct_children, key=lambda n: len(n.item.prod)):
+                    queue.append((child, paths[:-1] + [paths[-1] + [LRPath(node, [], use_marker=False)]]))
+            elif '<empty>' in first_set[following_symbol]:
+                queue.append((node.successor, paths[:-1] + [paths[-1] + [node.expand_empty(first_set)]] + [[]]))
+
         return None
 
 
@@ -495,7 +502,7 @@ class LRDominanceNode(object):
                     for p, la in self.successor.filter_node_by_lookahead(successor_path, lookahead, first_set):
                         result.append((path.expand(1, p), la))
                 if lookahead in first_set[following_symbol]:
-                    successor_path = self.successor.expand_lookahead(lookahead, first_set, set())
+                    successor_path = self.successor.expand_lookahead(lookahead, first_set)
                     result.append((path.expand(1, successor_path), None))
         else:
             result.append((path, lookahead))
