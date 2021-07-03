@@ -33,6 +33,7 @@
 
 import sys
 import inspect
+import io
 import functools
 from collections import OrderedDict, defaultdict, Counter
 
@@ -2416,12 +2417,12 @@ class Parser(metaclass=ParserMeta):
             raise YaccError('Can\'t build parsing tables')
 
         if cls.dotfile:
-            with open(cls.dotfile, 'w') as f:
+            with io.open(cls.dotfile, 'w', encoding='utf-8') as f:
                 f.write(cls._lrtable.dot_graph())
             cls.log.info('Parser dot graph for %s written to %s', cls.__qualname__, cls.dotfile)
 
         if cls.debugfile:
-            with open(cls.debugfile, 'w') as f:
+            with io.open(cls.debugfile, 'w', encoding='utf-8') as f:
                 f.write(str(cls._grammar))
                 f.write('\n')
                 f.write(str(cls._lrtable))
