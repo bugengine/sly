@@ -1,10 +1,8 @@
 In Progress
 -----------
 
-06/26/2021 Experimental support for counterexamples. SLYY will now give
+06/26/2021 Experimental support for counterexamples. SLY will now give
            counterexamples for shift/reduce and reduce/reduce conflicts.
-           Tested on simple conflict examples, as well as the full C 2x
-           grammar.
 
 05/09/2020 Experimental support for EBNF choices.  For example:
 
